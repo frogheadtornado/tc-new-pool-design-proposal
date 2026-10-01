@@ -30,7 +30,7 @@ contract SetFeesProposal {
  *      proposal through live governance. The SNARK verifier is mocked to accept any proof;
  *      Router, RelayerRegistry.burn, FeeManager and Governance are the live contracts.
  *
- *      Fee rules under test:
+ *      Fee rules under test (3 and 30 ETH pools; 0.01, 0.03 and 0.3 ETH are covered separately):
  *        - Router + registered relayer master → TORN stake burned, no ETH fee.
  *        - Anything else → 0.3% fee + 0.3% premium = 0.6% of the denomination paid in ETH to Governance in the
  *          same transaction, or accrued in the pool (sweepable) if Governance cannot receive it.
@@ -48,7 +48,9 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
 
     IFeeEnforcedTornado private _pool3;
     IFeeEnforcedTornado private _pool30;
-    ITornadoInstance private _pool03;
+    IFeeEnforcedTornado private _pool001;
+    IFeeEnforcedTornado private _pool003;
+    IFeeEnforcedTornado private _pool03;
 
     address private _worker;
     address private _recipient;
@@ -63,7 +65,9 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
         address[] memory all = _registry.getAllInstanceAddresses();
         _pool3 = IFeeEnforcedTornado(_findNewPool(all, before, _DENOM_3));
         _pool30 = IFeeEnforcedTornado(_findNewPool(all, before, _DENOM_30));
-        _pool03 = ITornadoInstance(_findNewPool(all, before, _DENOM_03));
+        _pool03 = IFeeEnforcedTornado(_findNewPool(all, before, _DENOM_03));
+        _pool001 = IFeeEnforcedTornado(_findNewPool(all, before, _DENOM_001));
+        _pool003 = IFeeEnforcedTornado(_findNewPool(all, before, _DENOM_003));
 
         vm.mockCall(_VERIFIER, abi.encodeWithSelector(IVerifier.verifyProof.selector), abi.encode(true));
 
@@ -358,15 +362,84 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
         assertEq(address(_pool3).balance, _DENOM_3, "one unspent note left");
     }
 
-    // --- No-fee pools stay classic ---
+    // --- 0.01, 0.03 and 0.3 ETH: free with a registered relayer, protocol fee otherwise ---
 
-    function testNoFeePoolDirectWithdrawPaysNothing() external {
-        _depositViaRouter(_depositor, address(_pool03), _DENOM_03, "c-0.3-direct");
-        bytes32 root = _pool03.getLastRoot();
+    function testSmallPoolsChargeProtocolFeeWithoutPremium() external view {
+        IFeeEnforcedTornado[3] memory pools = [_pool001, _pool003, _pool03];
+        for (uint256 i = 0; i < pools.length; i++) {
+            IFeeEnforcedTornado pool = pools[i];
+            assertEq(pool.protocolFeePercentage(), 30, "protocol fee");
+            assertEq(pool.directWithdrawPremiumPercentage(), 0, "no premium");
+            assertEq(pool.directWithdrawFeePercentage(), 30, "0.3%");
+            (,,,, uint32 relayerFee) = _registry.instances(address(pool));
+            assertEq(relayerFee, 0, "registered relayers pay nothing");
+        }
+        assertEq(_pool001.directWithdrawFee(), 0.00003 ether, "0.3% of 0.01 ETH");
+        assertEq(_pool003.directWithdrawFee(), 0.00009 ether, "0.3% of 0.03 ETH");
+        assertEq(_pool03.directWithdrawFee(), 0.0009 ether, "0.3% of 0.3 ETH");
+    }
+
+    function testSmallPoolDirectWithdrawPaysProtocolFee() external {
+        (bytes32 root, bytes32 nullifier) = _deposit(_pool001);
         vm.prank(_recipient);
-        _pool03.withdraw("", root, keccak256("n-0.3"), payable(_recipient), payable(address(0)), 0, 0);
+        _pool001.withdraw("", root, nullifier, payable(_recipient), payable(address(0)), 0, 0);
 
-        assertEq(_recipient.balance, _DENOM_03, "full denomination");
+        _assertEthFeeCharged(_pool001, address(0), 0);
+        assertEq(_recipient.balance, 0.00997 ether, "0.01 ETH - 0.3%");
+    }
+
+    function testSmallPoolCustomRelayerViaRouterPaysProtocolFee() external {
+        address customRelayer = makeAddr("customRelayer");
+        uint256 relayerFee = 0.0003 ether;
+        (bytes32 root, bytes32 nullifier) = _deposit(_pool003);
+        vm.prank(customRelayer);
+        _router.withdraw(
+            address(_pool003), "", root, nullifier, payable(_recipient), payable(customRelayer), relayerFee, 0
+        );
+
+        _assertEthFeeCharged(_pool003, customRelayer, relayerFee);
+    }
+
+    function testSmallPoolRegisteredRelayerPaysNothing() external {
+        uint256 relayerFee = 0.0001 ether;
+        (bytes32 root, bytes32 nullifier) = _deposit(_pool001);
+
+        uint256 stakeBefore = _relayerRegistry.getRelayerBalance(_RELAYER_MASTER);
+        uint256 relayerEthBefore = _RELAYER_MASTER.balance;
+        vm.prank(_worker);
+        _router.withdraw(
+            address(_pool001), "", root, nullifier, payable(_recipient), payable(_RELAYER_MASTER), relayerFee, 0
+        );
+
+        assertEq(_recipient.balance, _DENOM_001 - relayerFee, "recipient: denomination - relayer fee");
+        assertEq(_RELAYER_MASTER.balance, relayerEthBefore + relayerFee, "relayer fee paid");
+        assertEq(_GOVERNANCE.balance, _govBalanceBefore, "no ETH protocol fee");
+        assertEq(_pool001.accruedProtocolFees(), 0, "nothing accrued");
+        assertEq(_relayerRegistry.getRelayerBalance(_RELAYER_MASTER), stakeBefore, "no TORN burned");
+    }
+
+    function testPoint3PoolDirectWithdrawPaysProtocolFee() external {
+        (bytes32 root, bytes32 nullifier) = _deposit(_pool03);
+        vm.prank(_recipient);
+        _pool03.withdraw("", root, nullifier, payable(_recipient), payable(address(0)), 0, 0);
+
+        _assertEthFeeCharged(_pool03, address(0), 0);
+        assertEq(_recipient.balance, 0.2991 ether, "0.3 ETH - 0.3%");
+    }
+
+    function testPoint3PoolRegisteredRelayerPaysNothing() external {
+        uint256 relayerFee = 0.001 ether;
+        (bytes32 root, bytes32 nullifier) = _deposit(_pool03);
+
+        uint256 stakeBefore = _relayerRegistry.getRelayerBalance(_RELAYER_MASTER);
+        vm.prank(_worker);
+        _router.withdraw(
+            address(_pool03), "", root, nullifier, payable(_recipient), payable(_RELAYER_MASTER), relayerFee, 0
+        );
+
+        assertEq(_recipient.balance, _DENOM_03 - relayerFee, "recipient: denomination - relayer fee");
+        assertEq(_GOVERNANCE.balance, _govBalanceBefore, "no ETH protocol fee");
+        assertEq(_relayerRegistry.getRelayerBalance(_RELAYER_MASTER), stakeBefore, "no TORN burned");
     }
 
     // --- Helpers ---
@@ -393,7 +466,6 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
 
     function _assertEthFeeCharged(IFeeEnforcedTornado pool, address relayer, uint256 relayerFee) internal view {
         uint256 protocolFee = _directFee(pool);
-        assertEq(protocolFee, pool.denomination() * 60 / 10_000, "0.6% of denomination");
         assertEq(protocolFee, pool.directWithdrawFee(), "directWithdrawFee getter");
         assertEq(_GOVERNANCE.balance, _govBalanceBefore + protocolFee, "ETH protocol fee paid to governance");
         assertEq(pool.accruedProtocolFees(), 0, "nothing accrued");

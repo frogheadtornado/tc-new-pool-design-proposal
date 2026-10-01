@@ -111,8 +111,6 @@ abstract contract ProposalFixture is Test {
     address internal constant _RELAYER_REGISTRY = 0x58E8dCC13BE9780fC42E8723D8EaD4CF46943dF2;
     address internal constant _ROUTER = 0xd90e2f925DA726b50C4Ed8D0Fb90Ad053324F31b;
     address internal constant _VERIFIER = 0xce172ce1F20EC0B3728c9965470eaf994A03557A;
-    // Live 1 ETH pool — shared TornadoCash_eth runtime with 10/100 ETH.
-    address internal constant _LIVE_1_ETH = 0x47CE0C6eD5B0Ce3d3A51fdb1C52DC66a7c3c2936;
 
     // Governance ProposalState enum (live contract).
     uint8 internal constant _STATE_AWAITING_EXECUTION = 4;
