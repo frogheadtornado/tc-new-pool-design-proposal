@@ -3,7 +3,7 @@ pragma solidity ^0.5.8;
 pragma experimental ABIEncoderV2;
 
 import "./classic/TornadoCash_eth.sol";
-import "./TornadoCashFee_eth.sol";
+import "./FeeEnforcedTornado_eth.sol";
 import "./interfaces/IInstanceRegistry.sol";
 
 /**
@@ -14,7 +14,7 @@ import "./interfaces/IInstanceRegistry.sol";
  *      Hasher linked to the shared MiMC library. Operator is address(0).
  *      Pools > 1 ETH charge a protocol fee: registered relayers pay it as burned TORN stake
  *      (registry `protocolFeePercentage`), every other withdrawal pays that fee plus a premium in ETH inside
- *      the pool (`TornadoCashFee_eth`). Pools <= 1 ETH have no fee and use the unmodified
+ *      the pool (`FeeEnforcedTornado_eth`). Pools <= 1 ETH have no fee and use the unmodified
  *      classic `TornadoCash_eth`.
  */
 contract AddEthPoolsProposal {
@@ -38,7 +38,7 @@ contract AddEthPoolsProposal {
         bool charged = denomination > 1 ether;
         address instance = charged
             ? address(
-                new TornadoCashFee_eth(
+                new FeeEnforcedTornado_eth(
                     IVerifier(VERIFIER),
                     denomination,
                     MERKLE_TREE_HEIGHT,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {ProposalFixture, IRelayerRegistry, ITornadoInstance, ITornadoFeeInstance} from "./utils/ProposalFixture.sol";
+import {ProposalFixture, IRelayerRegistry, ITornadoInstance, IFeeEnforcedTornado} from "./utils/ProposalFixture.sol";
 
 interface IVerifier {
     function verifyProof(bytes memory proof, uint256[6] memory input) external returns (bool);
@@ -9,11 +9,11 @@ interface IVerifier {
 
 /// @dev Governance proposal (delegatecalled by Governance) that changes a fee pool's fee and premium.
 contract SetFeesProposal {
-    ITornadoFeeInstance public immutable pool;
+    IFeeEnforcedTornado public immutable pool;
     uint256 public immutable feePercentage;
     uint256 public immutable premiumPercentage;
 
-    constructor(ITornadoFeeInstance _pool, uint256 _feePercentage, uint256 _premiumPercentage) {
+    constructor(IFeeEnforcedTornado _pool, uint256 _feePercentage, uint256 _premiumPercentage) {
         pool = _pool;
         feePercentage = _feePercentage;
         premiumPercentage = _premiumPercentage;
@@ -35,7 +35,7 @@ contract SetFeesProposal {
  *        - Anything else → 0.3% fee + 0.3% premium = 0.6% of the denomination paid in ETH to Governance in the
  *          same transaction, or accrued in the pool (sweepable) if Governance cannot receive it.
  */
-contract TornadoCashFeeEthTest is ProposalFixture {
+contract FeeEnforcedTornadoEthTest is ProposalFixture {
     /// @dev Live registered relayer master (workers[master] == master) with ample stake.
     address private constant _RELAYER_MASTER = 0x4750BCfcC340AA4B31be7e71fa072716d28c29C5;
     uint256 private constant _RELAYER_FEE = 0.01 ether;
@@ -46,8 +46,8 @@ contract TornadoCashFeeEthTest is ProposalFixture {
 
     event ProtocolFeeCharged(address indexed relayer, uint256 amount, bool paidToGovernance);
 
-    ITornadoFeeInstance private _pool3;
-    ITornadoFeeInstance private _pool30;
+    IFeeEnforcedTornado private _pool3;
+    IFeeEnforcedTornado private _pool30;
     ITornadoInstance private _pool03;
 
     address private _worker;
@@ -61,8 +61,8 @@ contract TornadoCashFeeEthTest is ProposalFixture {
         _forkAndDeployProposal();
         uint256 before = _passAndExecuteProposal();
         address[] memory all = _registry.getAllInstanceAddresses();
-        _pool3 = ITornadoFeeInstance(_findNewPool(all, before, _DENOM_3));
-        _pool30 = ITornadoFeeInstance(_findNewPool(all, before, _DENOM_30));
+        _pool3 = IFeeEnforcedTornado(_findNewPool(all, before, _DENOM_3));
+        _pool30 = IFeeEnforcedTornado(_findNewPool(all, before, _DENOM_30));
         _pool03 = ITornadoInstance(_findNewPool(all, before, _DENOM_03));
 
         vm.mockCall(_VERIFIER, abi.encodeWithSelector(IVerifier.verifyProof.selector), abi.encode(true));
@@ -371,7 +371,7 @@ contract TornadoCashFeeEthTest is ProposalFixture {
 
     // --- Helpers ---
 
-    function _assertRegisteredRelayerPaysTorn(ITornadoFeeInstance pool) internal {
+    function _assertRegisteredRelayerPaysTorn(IFeeEnforcedTornado pool) internal {
         (bytes32 root, bytes32 nullifier) = _deposit(pool);
         assertTrue(pool.isRegisteredRelayerWithdrawal(_ROUTER, _RELAYER_MASTER), "router + master");
 
@@ -391,7 +391,7 @@ contract TornadoCashFeeEthTest is ProposalFixture {
         assertLt(_relayerRegistry.getRelayerBalance(_RELAYER_MASTER), stakeBefore, "TORN stake burned");
     }
 
-    function _assertEthFeeCharged(ITornadoFeeInstance pool, address relayer, uint256 relayerFee) internal view {
+    function _assertEthFeeCharged(IFeeEnforcedTornado pool, address relayer, uint256 relayerFee) internal view {
         uint256 protocolFee = _directFee(pool);
         assertEq(protocolFee, pool.denomination() * 60 / 10_000, "0.6% of denomination");
         assertEq(protocolFee, pool.directWithdrawFee(), "directWithdrawFee getter");
@@ -405,7 +405,7 @@ contract TornadoCashFeeEthTest is ProposalFixture {
         assertEq(address(pool).balance, 0, "nothing left in pool");
     }
 
-    function _assertFeeAccrued(ITornadoFeeInstance pool) internal view {
+    function _assertFeeAccrued(IFeeEnforcedTornado pool) internal view {
         uint256 protocolFee = _directFee(pool);
         assertEq(pool.accruedProtocolFees(), protocolFee, "fee accrued");
         assertEq(address(pool).balance, protocolFee, "fee kept in pool");
@@ -413,7 +413,7 @@ contract TornadoCashFeeEthTest is ProposalFixture {
         assertEq(_recipient.balance, pool.denomination() - protocolFee, "recipient still paid");
     }
 
-    function _directFee(ITornadoFeeInstance pool) internal view returns (uint256) {
+    function _directFee(IFeeEnforcedTornado pool) internal view returns (uint256) {
         return pool.denomination() * pool.directWithdrawFeePercentage() / 10_000;
     }
 

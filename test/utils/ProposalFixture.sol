@@ -41,7 +41,7 @@ interface ITornadoInstance {
     ) external payable;
 }
 
-interface ITornadoFeeInstance is ITornadoInstance {
+interface IFeeEnforcedTornado is ITornadoInstance {
     function RELAYER_REGISTRY() external view returns (address);
     function GOVERNANCE() external view returns (address);
     function MAX_PROTOCOL_FEE_PERCENTAGE() external view returns (uint256);

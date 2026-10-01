@@ -33,7 +33,7 @@ As a result, the DAO only gets paid when users choose to use a registered relaye
 
 ## How this proposal solves it
 
-The 3 and 30 ETH pools use a new contract, `TornadoCashFee_eth`, that charges the fee **inside the pool**. Every withdrawal, whatever path it takes, ends in `pool.withdraw()`, so the fee cannot be skipped by avoiding the Router or the RelayerRegistry.
+The 3 and 30 ETH pools use a new contract, `FeeEnforcedTornado_eth`, that charges the fee **inside the pool**. Every withdrawal, whatever path it takes, ends in `pool.withdraw()`, so the fee cannot be skipped by avoiding the Router or the RelayerRegistry.
 
 On each withdrawal the pool decides whether the fee has already been paid in TORN:
 
@@ -67,7 +67,7 @@ Design choices that keep this safe for users:
 - **Withdrawals never depend on relayers or Governance.** Users can always withdraw directly; they just pay the ETH fee. If the RelayerRegistry or Governance ever breaks, withdrawals keep working (see [Protocol fee details](#protocol-fee-details-3-and-30-eth)).
 - **The premium rewards using registered relayers.** Paying 0.6% directly instead of 0.3% through a relayer makes relayers the cheaper option, which also protects privacy: withdrawing directly requires funding the withdrawing address with gas.
 - **The DAO controls the fee, within limits.** Governance can change the fee and the premium on each pool, capped at 1% and 4%, so even a compromised Governance cannot drain deposits through the fee.
-- **Minimal new code.** `TornadoCashFee_eth` reuses the verified classic `Tornado` base unchanged; only `_processWithdraw` differs. The circuit and verifier are the same as the live pools. The 0.01, 0.03 and 0.3 ETH pools are bytecode-identical to the live 1 ETH pool.
+- **Minimal new code.** `FeeEnforcedTornado_eth` reuses the verified classic `Tornado` base unchanged; only `_processWithdraw` differs. The circuit and verifier are the same as the live pools. The 0.01, 0.03 and 0.3 ETH pools are bytecode-identical to the live 1 ETH pool.
 
 The live 1, 10 and 100 ETH pools are already deployed and cannot be changed, so they keep the gap; this proposal only covers the pools it creates.
 
@@ -79,7 +79,7 @@ The live 1, 10 and 100 ETH pools are already deployed and cannot be changed, so 
 
 1. Deploys a new pool (merkle height 20, `operator = address(0)`, the shared verifier, and the MiMC `Hasher` library at the same address as the live 1/10/100 ETH pools):
    - 0.01, 0.03, 0.3 ETH: classic `TornadoCash_eth`.
-   - 3, 30 ETH: `TornadoCashFee_eth` with `protocolFeePercentage = 30` and `directWithdrawPremiumPercentage = 30`.
+   - 3, 30 ETH: `FeeEnforcedTornado_eth` with `protocolFeePercentage = 30` and `directWithdrawPremiumPercentage = 30`.
 2. Registers it as `ENABLED` in the [InstanceRegistry](https://etherscan.io/address/0xB20c66C4DE72433F3cE747b58B86830c459CA911) so the [Tornado Router](https://etherscan.io/address/0xd90e2f925DA726b50C4Ed8D0Fb90Ad053324F31b) can route deposits and withdrawals. The registry `protocolFeePercentage` is `30` (0.3%) for the 3 and 30 ETH pools and `0` for the rest.
 
 Fees use the same scale as the live FeeManager: values are divided by `10000`, so `30` = 0.3%.
@@ -104,7 +104,7 @@ Example with a 30 ETH note:
 - The ETH fee is sent to Governance during the withdrawal with a gas-capped call (`FEE_TRANSFER_GAS` = 50k; Governance needs ~5.3k). If Governance cannot receive it (reverts, runs out of gas, broken upgrade), the withdrawal still succeeds and the fee accrues in the pool. Anyone can later send accrued fees to Governance with `sweepProtocolFees()`. The event `ProtocolFeeCharged(relayer, amount, paidToGovernance)` records which happened.
 - The premium is independent of the fee: setting the fee to 0 still charges the premium. To make direct withdrawals free, set both to 0.
 - Registry reads use `staticcall`: if the registry ever reverts, withdrawals still work and pay the ETH fee. Funds never depend on relayers or Governance to exit.
-- `TornadoCashFee_eth` reuses the verified classic `Tornado` base unchanged; only `_processWithdraw` differs. The circuit and verifier are unchanged.
+- `FeeEnforcedTornado_eth` reuses the verified classic `Tornado` base unchanged; only `_processWithdraw` differs. The circuit and verifier are unchanged.
 
 ## Using the ETH fees
 
@@ -127,7 +127,7 @@ The no-fee pools (0.01, 0.03, 0.3 ETH) are compiled like mainnet [1 ETH](https:/
 | solc | `0.5.11` (optimizer **200** runs, **petersburg**) |
 | Hasher library | `0x83584f83f26aF4eDDA9CBe8C730bc87C364b28fe` |
 
-The fork test asserts each no-fee pool’s **metadata-stripped** runtime bytecode equals the live 1 ETH pool (opcode-identical). Full `extcodehash` still differs by the solc CBOR trailer: mainnet was verified with emscripten `0.5.11+commit.c082d0b4`, while Foundry uses the native binary `0.5.11+commit.22be8592`. That gate is **test-only** (not in `executeProposal()`). The 3 and 30 ETH pools are new code (`TornadoCashFee_eth`) and need their own review. The 0.1 ETH pool is a close sibling (`TornadoCash_Eth_01`) with a different codehash.
+The fork test asserts each no-fee pool’s **metadata-stripped** runtime bytecode equals the live 1 ETH pool (opcode-identical). Full `extcodehash` still differs by the solc CBOR trailer: mainnet was verified with emscripten `0.5.11+commit.c082d0b4`, while Foundry uses the native binary `0.5.11+commit.22be8592`. That gate is **test-only** (not in `executeProposal()`). The 3 and 30 ETH pools are new code (`FeeEnforcedTornado_eth`) and need their own review. The 0.1 ETH pool is a close sibling (`TornadoCash_Eth_01`) with a different codehash.
 
 ## Addresses
 
@@ -151,7 +151,7 @@ ETH_RPC_URL=https://ethereum-rpc.publicnode.com forge test -vvv
 
 The fork test spoofs a quorum-sized TORN holder (`deal`), runs the live governance cycle (`propose` → warp voting delay → `castVote` → warp voting period + execution delay → `execute`), asserts all five pools are `ENABLED` and opcode-match live 1 ETH, then deposits into each via the Tornado Router.
 
-`test/TornadoCashFee_eth.t.sol` executes the proposal the same way, mocks the SNARK verifier, and withdraws from the fee pools through every path: registered relayer via Router (TORN burned, no ETH fee), relayer without stake (reverts), unregistered sender naming a registered relayer (reverts), custom relayer via Router, `_relayer = 0`, direct call naming a registered relayer, direct self-withdraw, fees above denomination, a reverting registry, immediate fee payment to Governance, a reverting or gas-burning Governance (withdrawal still succeeds, fee accrues), the sweep of accrued fees, and fee changes (getters, a real governance proposal changing fee and premium, premium added to the fee, zero fee still charging the premium, both caps, non-governance callers). The registered-relayer cases use the live relayer `0x4750…29C5`.
+`test/FeeEnforcedTornado_eth.t.sol` executes the proposal the same way, mocks the SNARK verifier, and withdraws from the fee pools through every path: registered relayer via Router (TORN burned, no ETH fee), relayer without stake (reverts), unregistered sender naming a registered relayer (reverts), custom relayer via Router, `_relayer = 0`, direct call naming a registered relayer, direct self-withdraw, fees above denomination, a reverting registry, immediate fee payment to Governance, a reverting or gas-burning Governance (withdrawal still succeeds, fee accrues), the sweep of accrued fees, and fee changes (getters, a real governance proposal changing fee and premium, premium added to the fee, zero fee still charging the premium, both caps, non-governance callers). The registered-relayer cases use the live relayer `0x4750…29C5`.
 
 ## Governance submission
 
@@ -164,10 +164,10 @@ The fork test spoofs a quorum-sized TORN holder (`deal`), runs the live governan
 
 ```
 src/AddEthPoolsProposal.sol   # proposal (solc 0.5.11)
-src/TornadoCashFee_eth.sol    # fee-enforcing pool for 3/30 ETH
+src/FeeEnforcedTornado_eth.sol    # fee-enforcing pool for 3/30 ETH
 src/classic/TornadoCash_eth.sol  # verified classic mixer template
 src/interfaces/               # InstanceRegistry ABI
 test/AddEthPoolsProposal.t.sol
-test/TornadoCashFee_eth.t.sol
+test/FeeEnforcedTornado_eth.t.sol
 test/utils/ProposalFixture.sol  # shared fork + governance execution
 ```

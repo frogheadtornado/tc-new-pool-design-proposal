@@ -16,7 +16,7 @@ import "./classic/TornadoCash_eth.sol";
  *      `MAX_PROTOCOL_FEE_PERCENTAGE` and `directWithdrawPremiumPercentage` up to
  *      `MAX_DIRECT_WITHDRAW_PREMIUM_PERCENTAGE`; registry and fee recipient are fixed at deploy.
  */
-contract TornadoCashFee_eth is Tornado {
+contract FeeEnforcedTornado_eth is Tornado {
     address public constant RELAYER_REGISTRY = 0x58E8dCC13BE9780fC42E8723D8EaD4CF46943dF2;
     address payable public constant GOVERNANCE = 0x5efda50f22d34F262c29268506C5Fa42cB56A1Ce;
     // Same scale as FeeManager.PROTOCOL_FEE_DIVIDER and the registry's protocolFeePercentage: 30 = 0.3%.

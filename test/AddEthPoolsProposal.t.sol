@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {ProposalFixture, IInstanceRegistry, ITornadoInstance, ITornadoFeeInstance} from "./utils/ProposalFixture.sol";
+import {ProposalFixture, IInstanceRegistry, ITornadoInstance, IFeeEnforcedTornado} from "./utils/ProposalFixture.sol";
 
 /**
  * @dev Mainnet-fork E2E: spoof a large TORN holder, run propose → vote → execute
@@ -12,7 +12,7 @@ import {ProposalFixture, IInstanceRegistry, ITornadoInstance, ITornadoFeeInstanc
  *      [EVM body || solc CBOR metadata || uint16 metaLen]. We strip the metadata
  *      trailer and require the EVM body to equal the live 1 ETH pool byte-for-byte.
  *      Full extcodehash still differs (native solc 22be8592 vs emscripten c082d0b4).
- *      Only the no-fee pools (<= 1 ETH) are classic; 3 and 30 ETH are `TornadoCashFee_eth`.
+ *      Only the no-fee pools (<= 1 ETH) are classic; 3 and 30 ETH are `FeeEnforcedTornado_eth`.
  */
 contract AddEthPoolsProposalTest is ProposalFixture {
     /// @dev Metadata-stripped runtime of live 1 ETH (the EVM body inside extcodehash).
@@ -55,7 +55,7 @@ contract AddEthPoolsProposalTest is ProposalFixture {
         _assertExtcodeEvmBodyMatchesLive1Eth(pool003);
         _assertExtcodeEvmBodyMatchesLive1Eth(pool03);
 
-        // Fee pools run TornadoCashFee_eth: different code, direct withdrawals pay the 0.3% fee + 0.3% premium.
+        // Fee pools run FeeEnforcedTornado_eth: different code, direct withdrawals pay the 0.3% fee + 0.3% premium.
         _assertFeePool(pool3);
         _assertFeePool(pool30);
 
@@ -84,7 +84,7 @@ contract AddEthPoolsProposalTest is ProposalFixture {
     }
 
     function _assertFeePool(address pool) internal view {
-        ITornadoFeeInstance feePool = ITornadoFeeInstance(pool);
+        IFeeEnforcedTornado feePool = IFeeEnforcedTornado(pool);
         assertEq(feePool.protocolFeePercentage(), 30, "protocol fee");
         assertEq(feePool.directWithdrawPremiumPercentage(), 30, "premium");
         assertEq(feePool.directWithdrawFeePercentage(), 60, "direct withdraw fee");
