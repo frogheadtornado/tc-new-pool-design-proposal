@@ -28,6 +28,9 @@ contract FeeEnforcedTornado_eth is Tornado {
     // Gas forwarded to Governance with each fee payment. Governance needs ~5.3k to accept ETH;
     // the cap stops a broken or malicious receiver from making withdrawals run out of gas.
     uint256 public constant FEE_TRANSFER_GAS = 50000;
+    // Gas forwarded to each RelayerRegistry read. A read needs ~8k; the cap stops a broken or
+    // malicious registry from making withdrawals run out of gas.
+    uint256 public constant REGISTRY_CALL_GAS = 50000;
 
     uint256 public protocolFeePercentage;
     uint256 public directWithdrawPremiumPercentage;
@@ -129,8 +132,9 @@ contract FeeEnforcedTornado_eth is Tornado {
      *         `_relayer` and burns the protocol fee from its stake.
      * @dev `_relayer == 0` is rejected: workers(0) == 0, and burn lets an unregistered caller
      *      through without burning when the named relayer is unregistered.
-     *      Registry calls are low-level so that a broken or upgraded registry can never block
-     *      withdrawals; it only means the direct-withdrawal fee is charged.
+     *      Registry reads are gas-capped and copy at most 32 bytes of return data, so a broken
+     *      or malicious registry can never block withdrawals; it only means the
+     *      direct-withdrawal fee is charged.
      */
     function isRegisteredRelayerWithdrawal(address _caller, address _relayer) public view returns (bool) {
         if (_relayer == address(0)) return false;
@@ -165,9 +169,21 @@ contract FeeEnforcedTornado_eth is Tornado {
         }
     }
 
-    function _registryAddressCall(bytes memory _data) internal view returns (bool, address) {
-        (bool ok, bytes memory ret) = RELAYER_REGISTRY.staticcall(_data);
-        if (!ok || ret.length < 32) return (false, address(0));
-        return (true, abi.decode(ret, (address)));
+    /**
+     * @dev Reads an address from the RelayerRegistry without ever reverting the withdrawal.
+     *      Uses a raw staticcall with capped gas that copies at most 32 bytes of return data,
+     *      so the registry can neither consume all the gas nor return a large payload ("return
+     *      bomb") that makes the copy run out of gas.
+     */
+    function _registryAddressCall(bytes memory _data) internal view returns (bool ok, address result) {
+        address registry = RELAYER_REGISTRY;
+        uint256 gasLimit = REGISTRY_CALL_GAS;
+        assembly {
+            let out := mload(0x40)
+            ok := staticcall(gasLimit, registry, add(_data, 32), mload(_data), out, 32)
+            if lt(returndatasize(), 32) { ok := 0 }
+            result := and(mload(out), 0xffffffffffffffffffffffffffffffffffffffff)
+        }
+        if (!ok) result = address(0);
     }
 }

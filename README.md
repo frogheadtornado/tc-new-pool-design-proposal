@@ -1,6 +1,6 @@
 # Add ETH Pools — Tornado Cash Governance Proposal
 
-Tornado Cash governance proposal that adds 0.01, 0.03, 0.3, 3 and 30 ETH anonymity pools whose DAO protocol fee is impossible to bypass. This repo contains the on-chain proposal, the new pool contract and mainnet-fork tests (Foundry).
+Tornado Cash governance proposal that adds 0.01, 0.03, 0.3, 3 and 30 ETH anonymity pools whose DAO fee is impossible to bypass. This repo contains the on-chain proposal, the new pool contract and mainnet-fork tests (Foundry).
 
 ## Summary
 
@@ -111,7 +111,7 @@ Examples:
 - Governance can change the fee with `setProtocolFeePercentage()`, up to the hard cap `MAX_PROTOCOL_FEE_PERCENTAGE` = 100 (1%), and the premium with `setDirectWithdrawPremiumPercentage()`, up to `MAX_DIRECT_WITHDRAW_PREMIUM_PERCENTAGE` = 400 (4%). The worst case is therefore 5% on direct withdrawals, so a compromised Governance cannot drain deposits through the fee. The TORN burned on registered-relayer withdrawals comes from the InstanceRegistry `protocolFeePercentage`, so a proposal that changes the protocol fee should update both the pool and the registry. The registry address is fixed at deploy.
 - The ETH fee is sent to Governance during the withdrawal with a gas-capped call (`FEE_TRANSFER_GAS` = 50k; Governance needs ~5.3k). If Governance cannot receive it (reverts, runs out of gas, broken upgrade), the withdrawal still succeeds and the fee accrues in the pool. Anyone can later send accrued fees to Governance with `sweepProtocolFees()`. The event `ProtocolFeeCharged(relayer, amount, paidToGovernance)` records which happened.
 - The premium is independent of the fee: setting the fee to 0 still charges the premium. To make direct withdrawals free, set both to 0.
-- Registry reads use `staticcall`: if the registry ever reverts, withdrawals still work and pay the ETH fee. Funds never depend on relayers or Governance to exit.
+- RelayerRegistry reads are raw `staticcall`s capped at `REGISTRY_CALL_GAS` = 50k gas (each read needs ~8k) that copy at most 32 bytes of return data. The registry is a proxy that Governance can upgrade, so a broken or malicious version could revert, consume all the gas it is given, or return a huge payload (a "return bomb": copying the reply into the pool's memory would cost more gas than the pool has left, so every withdrawal would revert). With the cap and the bounded copy, any of these only means the pool treats the withdrawal as not coming from a registered relayer and charges the ETH fee. Funds never depend on relayers or Governance to exit.
 
 ## Using the ETH fees
 
@@ -157,7 +157,7 @@ ETH_RPC_URL=https://ethereum-rpc.publicnode.com forge test -vvv
 
 `test/AddEthPoolsProposal.t.sol` spoofs a quorum-sized TORN holder (`deal`), runs the live governance cycle (`propose` → warp voting delay → `castVote` → warp voting period + execution delay → `execute`), asserts all five pools are `ENABLED` with the expected fees and the compiled `FeeEnforcedTornado_eth` code, then deposits into each via the Tornado Router.
 
-`test/FeeEnforcedTornado_eth.t.sol` executes the proposal the same way, mocks the SNARK verifier, and withdraws from the pools through every path: registered relayer via Router (TORN burned on 3/30 ETH, nothing on 0.01/0.03/0.3 ETH), relayer without stake (reverts), unregistered sender naming a registered relayer (reverts), custom relayer via Router, `_relayer = 0`, direct call naming a registered relayer, direct self-withdraw, fees above denomination, a reverting registry, immediate fee payment to Governance, a reverting or gas-burning Governance (withdrawal still succeeds, fee accrues), the sweep of accrued fees, and fee changes (getters, a real governance proposal changing fee and premium, premium added to the fee, zero fee still charging the premium, both caps, non-governance callers). The registered-relayer cases use the live relayer `0x4750…29C5`.
+`test/FeeEnforcedTornado_eth.t.sol` executes the proposal the same way, mocks the SNARK verifier, and withdraws from the pools through every path: registered relayer via Router (TORN burned on 3/30 ETH, nothing on 0.01/0.03/0.3 ETH), relayer without stake (reverts), unregistered sender naming a registered relayer (reverts), custom relayer via Router, `_relayer = 0`, direct call naming a registered relayer, direct self-withdraw, fees above denomination, a reverting, gas-burning or return-bomb RelayerRegistry (withdrawal still succeeds, ETH fee charged), immediate fee payment to Governance, a reverting or gas-burning Governance (withdrawal still succeeds, fee accrues), the sweep of accrued fees, and fee changes (getters, a real governance proposal changing fee and premium, premium added to the fee, zero fee still charging the premium, both caps, non-governance callers). The registered-relayer cases use the live relayer `0x4750…29C5`.
 
 ## Governance submission
 

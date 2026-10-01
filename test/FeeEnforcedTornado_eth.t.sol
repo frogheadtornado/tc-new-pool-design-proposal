@@ -43,6 +43,8 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
     bytes private constant _REVERTING_CODE = hex"60006000fd";
     /// @dev JUMPDEST PUSH1 0 JUMP: a receiver that loops until it runs out of gas.
     bytes private constant _GAS_BURNING_CODE = hex"5b600056";
+    /// @dev PUSH3 0x100000 PUSH1 0 RETURN: returns 1 MiB of zeros (a "return bomb").
+    bytes private constant _RETURN_BOMB_CODE = hex"62100000" hex"6000" hex"f3";
 
     event ProtocolFeeCharged(address indexed relayer, uint256 amount, bool paidToGovernance);
 
@@ -168,14 +170,43 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
         _pool3.withdraw("", root, nullifier, payable(_recipient), payable(_recipient), tooHighRelayerFee, 0);
     }
 
-    function testBrokenRegistryStillAllowsWithdrawalWithEthFee() external {
-        // A reverting registry must never lock funds: it only means the ETH fee applies.
-        vm.mockCallRevert(_RELAYER_REGISTRY, abi.encodeWithSelector(IRelayerRegistry.tornadoRouter.selector), "");
-        (bytes32 root, bytes32 nullifier) = _deposit(_pool3);
-        vm.prank(_recipient);
-        _pool3.withdraw("", root, nullifier, payable(_recipient), payable(address(0)), 0, 0);
+    // A broken or malicious RelayerRegistry must never lock funds: it only means the ETH fee applies.
+    // These withdrawals name a non-zero relayer so that the pool actually reads the registry.
 
-        _assertEthFeeCharged(_pool3, address(0), 0);
+    function testRevertingRegistryStillAllowsWithdrawal() external {
+        (bytes32 root, bytes32 nullifier) = _deposit(_pool3);
+        vm.etch(_RELAYER_REGISTRY, _REVERTING_CODE);
+        _withdrawDirectNamingRelayer(_pool3, root, nullifier, 10_000_000);
+
+        _assertEthFeeCharged(_pool3, _RELAYER_MASTER, 0);
+    }
+
+    function testReturnBombRegistryStillAllowsWithdrawal() external {
+        // A 1 MiB reply costs the registry ~2.2M gas to build, and the pool about the same to copy.
+        // Uncapped, with a 3M budget the registry gets ~2.9M, builds the reply, and leaves the pool
+        // ~0.75M: the copy runs out of gas. A real attacker sizes the reply to the gas it receives,
+        // so no budget is safe. Capped, the registry runs out of gas and nothing is copied.
+        (bytes32 root, bytes32 nullifier) = _deposit(_pool3);
+        vm.etch(_RELAYER_REGISTRY, _RETURN_BOMB_CODE);
+        _withdrawDirectNamingRelayer(_pool3, root, nullifier, 3_000_000);
+
+        _assertEthFeeCharged(_pool3, _RELAYER_MASTER, 0);
+    }
+
+    function testGasBurningRegistryStillAllowsWithdrawal() external {
+        // Uncapped, the loop would take 63/64 of the 1M gas and leave too little to finish.
+        (bytes32 root, bytes32 nullifier) = _deposit(_pool3);
+        vm.etch(_RELAYER_REGISTRY, _GAS_BURNING_CODE);
+        _withdrawDirectNamingRelayer(_pool3, root, nullifier, 1_000_000);
+
+        _assertEthFeeCharged(_pool3, _RELAYER_MASTER, 0);
+    }
+
+    function testRegistryReadsUseLittleGas() external view {
+        assertEq(_pool3.REGISTRY_CALL_GAS(), 50_000, "cap");
+        uint256 gasBefore = gasleft();
+        assertTrue(_pool3.isRegisteredRelayerWithdrawal(_ROUTER, _RELAYER_MASTER), "registered");
+        assertLt(gasBefore - gasleft(), 50_000, "both reads fit well under one cap");
     }
 
     // --- Fee configuration ---
@@ -443,6 +474,14 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
     }
 
     // --- Helpers ---
+
+    /// @dev Direct withdrawal (no Router) naming a relayer, with a fixed gas budget.
+    function _withdrawDirectNamingRelayer(IFeeEnforcedTornado pool, bytes32 root, bytes32 nullifier, uint256 gas)
+        internal
+    {
+        vm.prank(_recipient);
+        pool.withdraw{gas: gas}("", root, nullifier, payable(_recipient), payable(_RELAYER_MASTER), 0, 0);
+    }
 
     function _assertRegisteredRelayerPaysTorn(IFeeEnforcedTornado pool) internal {
         (bytes32 root, bytes32 nullifier) = _deposit(pool);

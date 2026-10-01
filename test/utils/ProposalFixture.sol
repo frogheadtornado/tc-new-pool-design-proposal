@@ -56,6 +56,7 @@ interface IFeeEnforcedTornado is ITornadoInstance {
     function isRegisteredRelayerWithdrawal(address caller, address relayer) external view returns (bool);
     function sweepProtocolFees() external;
     function FEE_TRANSFER_GAS() external view returns (uint256);
+    function REGISTRY_CALL_GAS() external view returns (uint256);
 }
 
 interface IInstanceRegistry {
