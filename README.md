@@ -7,10 +7,12 @@ Tornado Cash governance proposal that adds 0.01, 0.03, 0.3, 3 and 30 ETH anonymi
 - Adds five new ETH pools to Tornado Cash: 0.01, 0.03, 0.3, 3 and 30 ETH. Together with the live 0.1, 1, 10 and 100 ETH pools, the denominations become `0.01 — 0.03 — 0.1 — 0.3 — 1 — 3 — 10 — 30 — 100` ETH.
 - All five pools use a new contract, `FeeEnforcedTornado_eth`, which charges the DAO fee inside the pool, so no withdrawal path can skip it:
 
-  | Pool | Withdrawal through a registered relayer | Any other withdrawal (direct, self-relay, unregistered relayer) |
-  | --- | --- | --- |
-  | 0.01, 0.03, 0.3 ETH | Free | 0.3% in ETH to the DAO |
-  | 3, 30 ETH | 0.3% in TORN, burned from the relayer's stake | 0.3% fee + 0.3% premium = 0.6% in ETH to the DAO |
+  | Pool | Protocol fee | Premium | Withdrawal through a registered relayer | Any other withdrawal (direct, self-relay, unregistered relayer) |
+  | --- | --- | --- | --- | --- |
+  | 0.01, 0.03, 0.3 ETH | 0 | 0.3% | Free | 0 + 0.3% = 0.3% in ETH to the DAO |
+  | 3, 30 ETH | 0.3% | 0.3% | 0.3% in TORN, burned from the relayer's stake | 0.3% + 0.3% = 0.6% in ETH to the DAO |
+
+  The **protocol fee** is paid on every withdrawal: in TORN by registered relayers, in ETH by everyone else. The **premium** is paid in ETH, on top of the protocol fee, only by withdrawals that do not use a registered relayer.
 
 - The ETH fee is sent to the DAO (Governance contract) in the same transaction as the withdrawal.
 - Users can always withdraw, with or without a relayer. Nothing in the fee logic can lock funds.
@@ -81,17 +83,17 @@ The live 0.1, 1, 10 and 100 ETH pools are already deployed and cannot be changed
 
 `AddEthPoolsProposal.executeProposal()` is delegatecalled by Tornado Governance after the vote passes. For each denomination it:
 
-1. Deploys a `FeeEnforcedTornado_eth` pool (merkle height 20, `operator = address(0)`, the shared verifier, and the MiMC `Hasher` library at the same address as the live 1/10/100 ETH pools) with `protocolFeePercentage = 30` and:
-   - 0.01, 0.03, 0.3 ETH: `directWithdrawPremiumPercentage = 0`.
-   - 3, 30 ETH: `directWithdrawPremiumPercentage = 30`.
-2. Registers it as `ENABLED` in the [InstanceRegistry](https://etherscan.io/address/0xB20c66C4DE72433F3cE747b58B86830c459CA911) so the [Tornado Router](https://etherscan.io/address/0xd90e2f925DA726b50C4Ed8D0Fb90Ad053324F31b) can route deposits and withdrawals. The registry `protocolFeePercentage` (TORN burned on registered-relayer withdrawals) is `30` (0.3%) for 3 and 30 ETH and `0` for 0.01, 0.03 and 0.3 ETH.
+1. Deploys a `FeeEnforcedTornado_eth` pool (merkle height 20, `operator = address(0)`, the shared verifier, and the MiMC `Hasher` library at the same address as the live 1/10/100 ETH pools) with `directWithdrawPremiumPercentage = 30` and:
+   - 0.01, 0.03, 0.3 ETH: `protocolFeePercentage = 0`.
+   - 3, 30 ETH: `protocolFeePercentage = 30`.
+2. Registers it as `ENABLED` in the [InstanceRegistry](https://etherscan.io/address/0xB20c66C4DE72433F3cE747b58B86830c459CA911) so the [Tornado Router](https://etherscan.io/address/0xd90e2f925DA726b50C4Ed8D0Fb90Ad053324F31b) can route deposits and withdrawals, with the same `protocolFeePercentage` as the pool. That value sets the TORN burned on registered-relayer withdrawals, so the pool and the registry always start with the same protocol fee.
 
 Fees use the same scale as the live FeeManager: values are divided by `10000`, so `30` = 0.3%.
 
 ### How a withdrawal is charged
 
 - **Registered relayer through the Router:** the Router calls `burn`, which burns the registry fee (in TORN, at the Uniswap TWAP price) from the relayer's stake: 0.3% on 3 and 30 ETH, nothing on 0.01, 0.03 and 0.3 ETH. The pool pays `denomination - relayerFee` to the user and `relayerFee` to the relayer.
-- **Any other path:** the pool keeps `protocolFeePercentage + directWithdrawPremiumPercentage` of the denomination (0.3% on 0.01, 0.03 and 0.3 ETH; 0.6% on 3 and 30 ETH), sends it to Governance in the same transaction, and pays the rest to the user (minus any relayer fee).
+- **Any other path:** the pool keeps `protocolFeePercentage + directWithdrawPremiumPercentage` of the denomination (0 + 0.3% on 0.01, 0.03 and 0.3 ETH; 0.3% + 0.3% on 3 and 30 ETH), sends it to Governance in the same transaction, and pays the rest to the user (minus any relayer fee).
 
 Examples:
 
@@ -106,7 +108,7 @@ Examples:
 
 - "Registered" = `msg.sender == RelayerRegistry.tornadoRouter()` and `RelayerRegistry.workers(_relayer) == _relayer` and `_relayer != 0`. Together these force `burn` to require the Router's caller to be a worker of `_relayer` and to burn its stake.
 - The ETH fee is `protocolFeePercentage` + `directWithdrawPremiumPercentage`, both in basis points (divided by `PROTOCOL_FEE_DIVIDER` = 10000). Read them with `protocolFeePercentage()`, `directWithdrawPremiumPercentage()`, `directWithdrawFeePercentage()` (the sum) and `directWithdrawFee()` (amount in wei).
-- Governance can change the fee with `setProtocolFeePercentage()`, up to the hard cap `MAX_PROTOCOL_FEE_PERCENTAGE` = 100 (1%), and the premium with `setDirectWithdrawPremiumPercentage()`, up to `MAX_DIRECT_WITHDRAW_PREMIUM_PERCENTAGE` = 400 (4%). The worst case is therefore 5% on direct withdrawals, so a compromised Governance cannot drain deposits through the fee. The TORN burned on registered-relayer withdrawals is set separately, by the InstanceRegistry `protocolFeePercentage`. The registry address is fixed at deploy.
+- Governance can change the fee with `setProtocolFeePercentage()`, up to the hard cap `MAX_PROTOCOL_FEE_PERCENTAGE` = 100 (1%), and the premium with `setDirectWithdrawPremiumPercentage()`, up to `MAX_DIRECT_WITHDRAW_PREMIUM_PERCENTAGE` = 400 (4%). The worst case is therefore 5% on direct withdrawals, so a compromised Governance cannot drain deposits through the fee. The TORN burned on registered-relayer withdrawals comes from the InstanceRegistry `protocolFeePercentage`, so a proposal that changes the protocol fee should update both the pool and the registry. The registry address is fixed at deploy.
 - The ETH fee is sent to Governance during the withdrawal with a gas-capped call (`FEE_TRANSFER_GAS` = 50k; Governance needs ~5.3k). If Governance cannot receive it (reverts, runs out of gas, broken upgrade), the withdrawal still succeeds and the fee accrues in the pool. Anyone can later send accrued fees to Governance with `sweepProtocolFees()`. The event `ProtocolFeeCharged(relayer, amount, paidToGovernance)` records which happened.
 - The premium is independent of the fee: setting the fee to 0 still charges the premium. To make direct withdrawals free, set both to 0.
 - Registry reads use `staticcall`: if the registry ever reverts, withdrawals still work and pay the ETH fee. Funds never depend on relayers or Governance to exit.

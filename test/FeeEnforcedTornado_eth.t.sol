@@ -362,15 +362,15 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
         assertEq(address(_pool3).balance, _DENOM_3, "one unspent note left");
     }
 
-    // --- 0.01, 0.03 and 0.3 ETH: free with a registered relayer, protocol fee otherwise ---
+    // --- 0.01, 0.03 and 0.3 ETH: protocol fee 0 (free with a registered relayer), 0.3% premium otherwise ---
 
-    function testSmallPoolsChargeProtocolFeeWithoutPremium() external view {
+    function testSmallPoolsChargeOnlyPremium() external view {
         IFeeEnforcedTornado[3] memory pools = [_pool001, _pool003, _pool03];
         for (uint256 i = 0; i < pools.length; i++) {
             IFeeEnforcedTornado pool = pools[i];
-            assertEq(pool.protocolFeePercentage(), 30, "protocol fee");
-            assertEq(pool.directWithdrawPremiumPercentage(), 0, "no premium");
-            assertEq(pool.directWithdrawFeePercentage(), 30, "0.3%");
+            assertEq(pool.protocolFeePercentage(), 0, "no protocol fee");
+            assertEq(pool.directWithdrawPremiumPercentage(), 30, "premium");
+            assertEq(pool.directWithdrawFeePercentage(), 30, "0 + 0.3%");
             (,,,, uint32 relayerFee) = _registry.instances(address(pool));
             assertEq(relayerFee, 0, "registered relayers pay nothing");
         }
@@ -379,7 +379,7 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
         assertEq(_pool03.directWithdrawFee(), 0.0009 ether, "0.3% of 0.3 ETH");
     }
 
-    function testSmallPoolDirectWithdrawPaysProtocolFee() external {
+    function testSmallPoolDirectWithdrawPaysPremium() external {
         (bytes32 root, bytes32 nullifier) = _deposit(_pool001);
         vm.prank(_recipient);
         _pool001.withdraw("", root, nullifier, payable(_recipient), payable(address(0)), 0, 0);
@@ -388,7 +388,7 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
         assertEq(_recipient.balance, 0.00997 ether, "0.01 ETH - 0.3%");
     }
 
-    function testSmallPoolCustomRelayerViaRouterPaysProtocolFee() external {
+    function testSmallPoolCustomRelayerViaRouterPaysPremium() external {
         address customRelayer = makeAddr("customRelayer");
         uint256 relayerFee = 0.0003 ether;
         (bytes32 root, bytes32 nullifier) = _deposit(_pool003);
@@ -418,7 +418,7 @@ contract FeeEnforcedTornadoEthTest is ProposalFixture {
         assertEq(_relayerRegistry.getRelayerBalance(_RELAYER_MASTER), stakeBefore, "no TORN burned");
     }
 
-    function testPoint3PoolDirectWithdrawPaysProtocolFee() external {
+    function testPoint3PoolDirectWithdrawPaysPremium() external {
         (bytes32 root, bytes32 nullifier) = _deposit(_pool03);
         vm.prank(_recipient);
         _pool03.withdraw("", root, nullifier, payable(_recipient), payable(address(0)), 0, 0);
