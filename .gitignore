@@ -18,3 +18,7 @@ docs/
 .env
 .env.*
 !.env.example
+
+# End-to-end test: dependencies and scratch output
+e2e/node_modules/
+e2e/.work/

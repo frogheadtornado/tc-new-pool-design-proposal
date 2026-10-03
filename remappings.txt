@@ -1,1 +1,3 @@
 forge-std/=lib/forge-std/src/
+@openzeppelin/contracts/=src/staking/vendor/@openzeppelin/contracts/
+torn-token/contracts/=src/staking/vendor/torn-token/contracts/

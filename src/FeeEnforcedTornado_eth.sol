@@ -9,8 +9,13 @@ import "./classic/TornadoCash_eth.sol";
  *           fee as burned TORN stake (RelayerRegistry.burn), so the pool charges nothing extra.
  *         - Any other withdrawal (direct call, self-relay, "custom relayer" through the Router)
  *           pays `protocolFeePercentage + directWithdrawPremiumPercentage` of the denomination in ETH,
- *           sent to Governance in the same transaction. If that transfer fails, the fee accrues
- *           in the pool instead and anyone can sweep it to Governance later.
+ *           paid to the TORN lockers (TornadoStakingRewards.addEthRewards) in the same transaction.
+ *           If that payment fails, the fee accrues in the pool instead and anyone can sweep it to
+ *           the staking contract later.
+ *         - The note owner decides in the proof how much the pool may charge: the `_refund` public
+ *           input, which ETH pools otherwise leave at zero, is the highest ETH fee the owner
+ *           accepts. A proof made for a registered relayer carries 0, so nobody can execute it on
+ *           a path where the pool would take the fee out of the owner's payout.
  * @dev Inherits the verified classic `Tornado` base unchanged; only `_processWithdraw` differs
  *      from `TornadoCash_eth`. Governance can change `protocolFeePercentage` up to the hard cap
  *      `MAX_PROTOCOL_FEE_PERCENTAGE` and `directWithdrawPremiumPercentage` up to
@@ -19,15 +24,18 @@ import "./classic/TornadoCash_eth.sol";
 contract FeeEnforcedTornado_eth is Tornado {
     address public constant RELAYER_REGISTRY = 0x58E8dCC13BE9780fC42E8723D8EaD4CF46943dF2;
     address payable public constant GOVERNANCE = 0x5efda50f22d34F262c29268506C5Fa42cB56A1Ce;
+    // Fee recipient: the TornadoStakingRewards proxy, which shares ETH among the TORN lockers.
+    address public constant STAKING_REWARDS = 0x5B3f656C80E8ddb9ec01Dd9018815576E9238c29;
     // Same scale as FeeManager.PROTOCOL_FEE_DIVIDER and the registry's protocolFeePercentage: 30 = 0.3%.
     uint256 public constant PROTOCOL_FEE_DIVIDER = 10000;
     // Hard caps so that a compromised Governance cannot drain deposits through the fee.
     // Worst case for a direct withdrawal: 100 + 400 = 500 = 5%.
     uint256 public constant MAX_PROTOCOL_FEE_PERCENTAGE = 100;
     uint256 public constant MAX_DIRECT_WITHDRAW_PREMIUM_PERCENTAGE = 400;
-    // Gas forwarded to Governance with each fee payment. Governance needs ~5.3k to accept ETH;
-    // the cap stops a broken or malicious receiver from making withdrawals run out of gas.
-    uint256 public constant FEE_TRANSFER_GAS = 50000;
+    // Gas forwarded to the staking contract with each fee payment. The payment needs ~43k the first
+    // time and ~26k afterwards; the cap stops a broken or malicious receiver from making withdrawals
+    // run out of gas.
+    uint256 public constant FEE_TRANSFER_GAS = 150000;
     // Gas forwarded to each RelayerRegistry read. A read needs ~8k; the cap stops a broken or
     // malicious registry from making withdrawals run out of gas.
     uint256 public constant REGISTRY_CALL_GAS = 50000;
@@ -35,8 +43,13 @@ contract FeeEnforcedTornado_eth is Tornado {
     uint256 public protocolFeePercentage;
     uint256 public directWithdrawPremiumPercentage;
     uint256 public accruedProtocolFees;
+    // 1 while idle, 2 while a fee is being paid to the staking contract. Deposits and withdrawals are
+    // refused while it is 2. The reentrancy guard of the classic base does not stop a nested call: it
+    // reverts the OUTER call once a nested guarded call has completed, so a fee receiver able to
+    // complete a deposit or a withdrawal inside the payment could block every withdrawal.
+    uint256 private feePaymentLock = 1;
 
-    event ProtocolFeeCharged(address indexed relayer, uint256 amount, bool paidToGovernance);
+    event ProtocolFeeCharged(address indexed relayer, uint256 amount, bool paidToStaking);
     event ProtocolFeesSwept(uint256 amount);
     event ProtocolFeeUpdated(uint256 oldFeePercentage, uint256 newFeePercentage);
     event DirectWithdrawPremiumUpdated(uint256 oldPremiumPercentage, uint256 newPremiumPercentage);
@@ -96,6 +109,7 @@ contract FeeEnforcedTornado_eth is Tornado {
     }
 
     function _processDeposit() internal {
+        require(feePaymentLock == 1, "Fee payment in progress");
         require(msg.value == denomination, "Please send `mixDenomination` ETH along with transaction");
     }
 
@@ -103,14 +117,19 @@ contract FeeEnforcedTornado_eth is Tornado {
         internal
     {
         // sanity checks
+        require(feePaymentLock == 1, "Fee payment in progress");
         require(msg.value == 0, "Message value is supposed to be zero for ETH instance");
-        require(_refund == 0, "Refund value is supposed to be zero for ETH instance");
 
         uint256 protocolFee = isRegisteredRelayerWithdrawal(msg.sender, _relayer) ? 0 : directWithdrawFee();
+        // Which fee applies depends on who submits the proof, and the proof does not bind that.
+        // It does bind `_refund`, used here as the highest fee the note owner accepts.
+        require(protocolFee <= _refund, "Protocol fee above what the note owner accepted");
         // _fee <= denomination and protocolFee <= denomination are already enforced, so the sum cannot overflow
         require(_fee + protocolFee <= denomination, "Fees exceed transfer value");
         if (protocolFee > 0) {
-            bool paid = _payGovernance(protocolFee);
+            feePaymentLock = 2;
+            bool paid = _payStakingRewards(protocolFee);
+            feePaymentLock = 1;
             if (!paid) {
                 accruedProtocolFees += protocolFee;
             }
@@ -145,27 +164,33 @@ contract FeeEnforcedTornado_eth is Tornado {
     }
 
     /**
-     * @dev Send fees that could not be paid during withdrawal to Governance. Callable by anyone.
+     * @dev Send fees that could not be paid during withdrawal to the staking contract. Callable by anyone.
+     *      Deliberately not `nonReentrant`: the fee receiver could call it from inside a withdrawal's
+     *      fee payment, and the guard of the classic base would then revert that withdrawal. The
+     *      accrued amount is zeroed before the call, so calling it again from the receiver finds
+     *      nothing to sweep.
      */
-    function sweepProtocolFees() external nonReentrant {
+    function sweepProtocolFees() external {
         uint256 amount = accruedProtocolFees;
         require(amount > 0, "Nothing to sweep");
         accruedProtocolFees = 0;
-        (bool success,) = GOVERNANCE.call.value(amount)("");
-        require(success, "payment to GOVERNANCE did not go thru");
+        (bool success,) = STAKING_REWARDS.call.value(amount)(abi.encodeWithSignature("addEthRewards()"));
+        require(success, "payment to STAKING_REWARDS did not go thru");
         emit ProtocolFeesSwept(amount);
     }
 
     /**
-     * @dev Pays Governance without ever reverting the withdrawal. Uses a raw call with capped
-     *      gas and no return data copy, so the receiver can neither consume all the gas nor
-     *      return a large payload that makes the copy run out of gas.
+     * @dev Pays the fee into the ETH rewards of the TORN lockers without ever reverting the
+     *      withdrawal. Uses a raw call with capped gas and no return data copy, so the receiver
+     *      can neither consume all the gas nor return a large payload that makes the copy run
+     *      out of gas.
      */
-    function _payGovernance(uint256 _amount) internal returns (bool paid) {
-        address payable receiver = GOVERNANCE;
+    function _payStakingRewards(uint256 _amount) internal returns (bool paid) {
+        address receiver = STAKING_REWARDS;
         uint256 gasLimit = FEE_TRANSFER_GAS;
+        bytes memory data = abi.encodeWithSignature("addEthRewards()");
         assembly {
-            paid := call(gasLimit, receiver, _amount, 0, 0, 0, 0)
+            paid := call(gasLimit, receiver, _amount, add(data, 32), mload(data), 0, 0)
         }
     }
 

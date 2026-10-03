@@ -1,97 +1,119 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {ProposalFixture, IInstanceRegistry, ITornadoInstance, IFeeEnforcedTornado} from "./utils/ProposalFixture.sol";
+import {ProposalFixture, IInstanceRegistry, IFeeEnforcedTornado, IProposal} from "./utils/ProposalFixture.sol";
+import {Deploy} from "../script/Deploy.s.sol";
 
 /**
- * @dev Mainnet-fork E2E: spoof a large TORN holder, run propose → vote → execute
- *      with time warps matching live governance delays, then deposit via TornadoRouter
- *      into each newly registered ETH pool.
- *
- * @dev Bytecode gate (test-only): every pool is `FeeEnforcedTornado_eth`, so each pool's
- *      runtime code must equal the compiled artifact of `src/FeeEnforcedTornado_eth.sol`.
- *      Runtime = [EVM body || solc CBOR metadata || uint16 metaLen]; we compare the EVM body
- *      so the check does not depend on the metadata hash.
+ * @dev Mainnet-fork E2E. The proposal, a single contract, is deployed first, as it would be before a
+ *      real vote. Then a spoofed large TORN holder runs propose → vote → execute with time warps
+ *      matching live governance delays. Execution deploys the 0.01 ETH pool and registers it.
  */
 contract AddEthPoolsProposalTest is ProposalFixture {
-    /// @dev Metadata-stripped runtime of the compiled FeeEnforcedTornado_eth artifact.
-    bytes private _artifactEvmBody;
+    /// @dev EIP-7825: a mainnet transaction cannot use more gas than this.
+    uint256 private constant _TRANSACTION_GAS_CAP = 16_777_216;
+    /// @dev EIP-1967 implementation slot of the staking proxy.
+    bytes32 private constant _IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
     function setUp() external {
         _forkAndDeployProposal();
-        _artifactEvmBody = _stripMetadata(vm.getDeployedCode("FeeEnforcedTornado_eth.sol:FeeEnforcedTornado_eth"));
-        assertTrue(_artifactEvmBody.length > 0, "artifact EVM body empty");
     }
 
-    function testGovernanceVoteExecuteAndRouterDeposits() external {
-        assertEq(vm.activeFork(), _forkId);
-        assertTrue(_proposal.code.length > 0, "proposal not deployed");
+    function testProposalDeploysAndRegistersThePool() external {
+        uint256 instancesBefore = _registry.getAllInstanceAddresses().length;
+        address expected = _nextContractOfGovernance();
+        assertEq(expected.code.length, 0, "the pool does not exist before the proposal is executed");
 
-        uint256 addressesBefore = _passAndExecuteProposal();
+        _passAndExecuteProposal();
 
-        // --- Five new pools registered ---
+        assertEq(address(_pool001), expected, "the pool is the contract Governance created");
+        assertEq(
+            keccak256(address(_pool001).code),
+            keccak256(vm.getDeployedCode("FeeEnforcedTornado_eth.sol:FeeEnforcedTornado_eth")),
+            "the deployed pool is the compiled FeeEnforcedTornado_eth"
+        );
+        assertEq(_registry.getAllInstanceAddresses().length, instancesBefore + 1, "one new instance");
+
+        // Registered relayers pay 0.3% in TORN; any other withdrawal pays 0.3% + 0.3% in ETH.
+        _assertPool(_pool001, _DENOM_001);
+
+        _depositViaRouter(makeAddr("depositor"), address(_pool001), _DENOM_001, "c-0.01");
+    }
+
+    function testProposalDoesNotTouchTheStakingContract() external {
+        // The staking contract is upgraded by a later proposal. This one leaves it as it is.
+        bytes32 implementationBefore = vm.load(_STAKING, _IMPLEMENTATION_SLOT);
+        bytes32 codeBefore = keccak256(_STAKING.code);
+
+        _passAndExecuteProposal();
+
+        assertEq(vm.load(_STAKING, _IMPLEMENTATION_SLOT), implementationBefore, "staking implementation");
+        assertEq(keccak256(_STAKING.code), codeBefore, "staking proxy");
+    }
+
+    function testProposalCalledDirectlyAddsNothing() external {
+        // The proposal is meant to be delegatecalled by Governance. Called directly it reverts: only
+        // Governance can register a pool.
+        uint256 instancesBefore = _registry.getAllInstanceAddresses().length;
+
+        vm.expectRevert();
+        IProposal(_proposal).executeProposal();
+
+        assertEq(_registry.getAllInstanceAddresses().length, instancesBefore, "nothing registered");
+    }
+
+    function testDeployScriptDeploysOnlyTheProposal() external {
+        // A fresh fork with nothing deployed: the script alone must leave the proposal executable, and
+        // the proposal must be the one contract it deploys.
+        _fork();
+        uint256 instancesBefore = _registry.getAllInstanceAddresses().length;
+        Deploy script = new Deploy();
+        uint256 createdBefore = vm.getNonce(address(script));
+
+        address deployed = script.deploy();
+        assertEq(vm.getNonce(address(script)), createdBefore + 1, "the script deploys one contract");
+        assertGt(deployed.code.length, 0, "the proposal");
+        assertEq(_registry.getAllInstanceAddresses().length, instancesBefore, "no pool yet");
+
+        address pool = _nextContractOfGovernance();
+        _passAndExecute(deployed, _DESCRIPTION);
         address[] memory all = _registry.getAllInstanceAddresses();
-        assertEq(all.length, addressesBefore + 5);
-
-        address pool001 = _findNewPool(all, addressesBefore, _DENOM_001);
-        address pool003 = _findNewPool(all, addressesBefore, _DENOM_003);
-        address pool03 = _findNewPool(all, addressesBefore, _DENOM_03);
-        address pool3 = _findNewPool(all, addressesBefore, _DENOM_3);
-        address pool30 = _findNewPool(all, addressesBefore, _DENOM_30);
-
-        // 0.01, 0.03, 0.3 ETH: protocol fee 0, so registered relayers pay nothing and direct
-        // withdrawals pay only the 0.3% premium.
-        // 3, 30 ETH: protocol fee 0.3% (TORN for registered relayers), direct withdrawals pay 0.3% + 0.3% premium.
-        _assertPool(pool001, _DENOM_001, 0);
-        _assertPool(pool003, _DENOM_003, 0);
-        _assertPool(pool03, _DENOM_03, 0);
-        _assertPool(pool3, _DENOM_3, 30);
-        _assertPool(pool30, _DENOM_30, 30);
-
-        // --- Router deposits into every new instance ---
-        address depositor = makeAddr("depositor");
-        _depositViaRouter(depositor, pool001, _DENOM_001, "c-0.01");
-        _depositViaRouter(depositor, pool003, _DENOM_003, "c-0.03");
-        _depositViaRouter(depositor, pool03, _DENOM_03, "c-0.3");
-        _depositViaRouter(depositor, pool3, _DENOM_3, "c-3");
-        _depositViaRouter(depositor, pool30, _DENOM_30, "c-30");
+        assertEq(all.length, instancesBefore + 1, "one new instance");
+        assertEq(all[instancesBefore], pool, "the pool, deployed by the proposal");
+        _assertPool(IFeeEnforcedTornado(pool), _DENOM_001);
     }
 
-    function _assertPool(address pool, uint256 denomination, uint32 fee) internal view {
-        assertEq(ITornadoInstance(pool).denomination(), denomination);
-        assertEq(ITornadoInstance(pool).verifier(), _VERIFIER, "verifier");
-        assertEq(ITornadoInstance(pool).levels(), uint32(20), "levels");
-        assertEq(ITornadoInstance(pool).operator(), address(0), "operator");
+    function testExecutionFitsInOneTransaction() external {
+        uint256 proposalId = _pass(_proposal, _DESCRIPTION);
+
+        uint256 gasBefore = gasleft();
+        _gov.execute(proposalId);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        assertEq(_gov.state(proposalId), _STATE_EXECUTED);
+        assertLt(gasUsed, _TRANSACTION_GAS_CAP, "execution must fit under the per-transaction gas cap");
+    }
+
+    function _assertPool(IFeeEnforcedTornado feePool, uint256 denomination) internal view {
+        assertEq(feePool.denomination(), denomination);
+        assertEq(feePool.verifier(), _VERIFIER, "verifier");
+        assertEq(feePool.levels(), uint32(20), "levels");
+        assertEq(feePool.operator(), address(0), "operator");
 
         (bool isERC20, address token, IInstanceRegistry.InstanceState state, uint24 uniswapFee, uint32 protocolFee) =
-            _registry.instances(pool);
+            _registry.instances(address(feePool));
         assertFalse(isERC20);
         assertEq(token, address(0));
         assertTrue(state == IInstanceRegistry.InstanceState.ENABLED);
         assertEq(uniswapFee, uint24(0));
-        assertEq(protocolFee, fee, "registry fee (TORN burned on registered-relayer withdrawals)");
+        assertEq(protocolFee, 30, "registry fee: 0.3% in TORN on registered-relayer withdrawals");
 
-        IFeeEnforcedTornado feePool = IFeeEnforcedTornado(pool);
-        assertEq(feePool.protocolFeePercentage(), fee, "pool protocol fee == registry fee");
-        assertEq(feePool.directWithdrawPremiumPercentage(), 30, "premium");
-        assertEq(feePool.directWithdrawFeePercentage(), fee + 30, "direct withdraw fee");
+        assertEq(feePool.protocolFeePercentage(), 30, "pool protocol fee == registry fee");
+        assertEq(feePool.directWithdrawPremiumPercentage(), 30, "0.3% premium");
+        assertEq(feePool.directWithdrawFeePercentage(), 60, "0.6% without a registered relayer");
         assertEq(feePool.accruedProtocolFees(), 0, "accrued fees");
         assertEq(feePool.RELAYER_REGISTRY(), _RELAYER_REGISTRY, "relayer registry");
-        assertEq(feePool.GOVERNANCE(), _GOVERNANCE, "fee recipient");
-
-        assertEq(_stripMetadata(pool.code), _artifactEvmBody, "pool code != FeeEnforcedTornado_eth artifact");
-    }
-
-    /// @dev Drop solc CBOR metadata trailer (last 2 bytes = big-endian metadata length).
-    function _stripMetadata(bytes memory code) internal pure returns (bytes memory) {
-        require(code.length >= 2, "code too short");
-        uint256 metaLen = (uint256(uint8(code[code.length - 2])) << 8) + uint256(uint8(code[code.length - 1]));
-        require(code.length >= metaLen + 2, "metadata length");
-        uint256 keep = code.length - metaLen - 2;
-        bytes memory out = new bytes(keep);
-        for (uint256 i = 0; i < keep; i++) {
-            out[i] = code[i];
-        }
-        return out;
+        assertEq(feePool.GOVERNANCE(), _GOVERNANCE, "fee admin");
+        assertEq(feePool.STAKING_REWARDS(), _STAKING, "fee recipient");
     }
 }

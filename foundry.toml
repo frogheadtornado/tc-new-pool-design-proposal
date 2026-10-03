@@ -30,9 +30,23 @@ optimizer = true
 optimizer_runs = 200
 
 [[profile.default.compilation_restrictions]]
-paths = "src/**/*.sol"
+paths = "src/{AddEthPoolsProposal.sol,FeeEnforcedTornado_eth.sol,classic/**,interfaces/**}"
 version = "=0.5.11"
 evm_version = "petersburg"
+optimizer_runs = 200
+
+# Staking implementation, and the proposal that deploys it (a later vote): match the live
+# TornadoStakingRewards (istanbul + solc 0.6.12).
+[[profile.default.additional_compiler_profiles]]
+name = "staking"
+evm_version = "istanbul"
+optimizer = true
+optimizer_runs = 200
+
+[[profile.default.compilation_restrictions]]
+paths = "src/staking/**"
+version = "=0.6.12"
+evm_version = "istanbul"
 optimizer_runs = 200
 
 # Default overrides for the CI runs.
@@ -40,9 +54,10 @@ optimizer_runs = 200
 force = true
 verbosity = 4
 
-# Keep verified classic mixer source byte-identical to Sourcify.
+# Keep the formatter away from verified sources: the classic mixer and the staking dependencies are
+# byte-identical to Sourcify, and the staking contract is the verified source plus marked additions.
 [fmt]
-ignore = ["src/classic/*.sol"]
+ignore = ["src/classic/*.sol", "src/staking/**/*.sol"]
 
 [rpc_endpoints]
 mainnet = "${ETH_RPC_URL}"
