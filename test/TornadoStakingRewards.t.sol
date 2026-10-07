@@ -193,6 +193,8 @@ contract TornadoStakingRewardsTest is ProposalFixture {
     address private constant _DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
     /// @dev 6 decimals, and `transfer` returns nothing.
     address private constant _USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
+    /// @dev `MAX_REWARD_TOKENS` of the new implementation (checked by testRewardTokenListIsCapped).
+    uint256 private constant _MAX_REWARD_TOKENS = 4;
     /// @dev EIP-1967 implementation slot of the staking proxy.
     bytes32 private constant _IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
@@ -484,6 +486,7 @@ contract TornadoStakingRewardsTest is ProposalFixture {
         // for ETH and this many tokens.
         _upgradeStaking();
         uint256 max = _staking.MAX_REWARD_TOKENS();
+        assertEq(max, _MAX_REWARD_TOKENS, "ETH and four tokens fit in a checkpoint");
         vm.startPrank(_GOVERNANCE);
         for (uint256 i = 0; i < max; i++) {
             _staking.addRewardToken(address(new PlainToken()));
@@ -917,7 +920,7 @@ contract TornadoStakingRewardsTest is ProposalFixture {
         assertEq(_staking.checkEthReward(_alice), 0, "nothing left in ETH");
         assertEq(_staking.checkTokenReward(_DAI, _alice), 0, "nothing left in DAI");
 
-        // Bob never moved: no checkpoint, and he is owed the rest.
+        // Bob never moved after his lock, which is his only checkpoint, and he is owed the rest.
         assertEq(_staking.checkpointCount(_bob), 1, "bob's only checkpoint is his lock");
         assertApproxEqAbs(_staking.checkEthReward(_bob), 6 ether - expectedEth, 16, "the rest of the ETH is bob's");
     }
@@ -1005,73 +1008,170 @@ contract TornadoStakingRewardsTest is ProposalFixture {
 
     /// forge-config: default.fuzz.runs = 32
     function testFuzzEveryAssetIsOwedWhatEachBalanceEarned(uint256 seed) external {
-        // Random locks, unlocks, fees in ETH, in DAI and in a token that is added half way, and claims
-        // in one go or a checkpoint at a time, by three lockers who stand for the whole locked supply.
-        // What each is owed in each asset is worked out here on its own: its share of each fee when it
-        // arrived.
+        // Random locks, unlocks, fees and claims, among the lockers really on mainnet. What each of
+        // three lockers is owed in each asset is worked out here on its own: its share of each fee
+        // when it arrived. The cases mixed in:
+        // - alice locked before the upgrade and has no checkpoint; bob and carol lock after it;
+        // - ETH is paid before anybody has a checkpoint;
+        // - every asset is used: ETH, DAI and tokens added at random moments, up to the maximum;
+        // - fees and locks of zero;
+        // - claims in one go and limited to 0, 1 or 2 checkpoints.
+        _lock(_alice, 2_000 ether);
         _upgradeStaking();
-        _addRewardToken(_DAI);
-        deal(_TORN, _vault, 0);
-        PlainToken late = new PlainToken();
+        _payEthRewards(1 ether);
         address[3] memory lockers = [_alice, _bob, _carol];
-        address[3] memory assets = [address(0), _DAI, address(late)];
-        uint256[3][3] memory owed;
+        uint256 maxTokens = _staking.MAX_REWARD_TOKENS();
+        address[] memory assets = new address[](maxTokens + 1);
+        uint256 added;
+        uint256[][] memory owed = new uint256[][](maxTokens + 1);
+        for (uint256 a = 0; a <= maxTokens; a++) {
+            owed[a] = new uint256[](3);
+        }
+        owed[0][0] = 1 ether * 2_000 ether / _torn.balanceOf(_vault);
 
-        for (uint256 step = 0; step < 28; step++) {
+        for (uint256 step = 0; step < 36; step++) {
             seed = uint256(keccak256(abi.encode(seed, step)));
             address locker = lockers[seed % 3];
-            uint256 asset = (seed >> 4) % 3;
-            uint256 action = (seed >> 8) % 6;
-            if (step == 14) {
-                vm.prank(_GOVERNANCE);
-                _staking.addRewardToken(address(late));
-            }
+            uint256 asset = (seed >> 4) % (added + 1);
+            uint256 action = (seed >> 8) % 8;
             if (action == 0) {
-                _lock(locker, 1 ether + (seed >> 16) % 5_000 ether);
+                _lock(locker, (seed >> 16) % 4 == 0 ? 0 : 1 ether + (seed >> 20) % 5_000 ether);
             } else if (action == 1) {
                 uint256 locked = _gov.lockedBalance(locker);
-                if (locked > 0) {
-                    vm.prank(locker);
-                    _gov.unlock(1 + (seed >> 16) % locked);
-                }
-            } else if (action <= 3) {
+                vm.prank(locker);
+                _gov.unlock(locked == 0 ? 0 : (seed >> 16) % (locked + 1));
+            } else if (action <= 4) {
+                uint256 fee = (seed >> 16) % 5 == 0 ? 0 : 1 + (seed >> 20) % 3 ether;
                 uint256 total = _torn.balanceOf(_vault);
-                if (total == 0 || (asset == 2 && step < 14)) continue;
-                uint256 fee = 1 + (seed >> 16) % 3 ether;
                 if (asset == 0) {
                     _payEthRewards(fee);
-                } else if (asset == 1) {
+                } else if (assets[asset] == _DAI) {
                     _payTokenRewards(_DAI, fee);
                 } else {
-                    late.mint(_STAKING, fee);
-                    _staking.addTokenRewards(address(late));
+                    PlainToken(assets[asset]).mint(_STAKING, fee);
+                    _staking.addTokenRewards(assets[asset]);
                 }
                 for (uint256 i = 0; i < 3; i++) {
                     owed[asset][i] += fee * _gov.lockedBalance(lockers[i]) / total;
                 }
-            } else {
-                if (asset == 2 && step < 14) continue;
-                uint256 limit = action == 4 ? type(uint256).max : 1;
+            } else if (action <= 6) {
+                uint256 limit = (seed >> 16) % 4;
+                if (limit == 3) limit = type(uint256).max;
                 vm.prank(locker);
                 if (asset == 0) _staking.getEthRewardUpTo(limit);
                 else _staking.getTokenRewardUpTo(assets[asset], limit);
+            } else if (added < maxTokens) {
+                added++;
+                if (added == 1) {
+                    _addRewardToken(_DAI);
+                    assets[added] = _DAI;
+                } else {
+                    assets[added] = address(new PlainToken());
+                    vm.prank(_GOVERNANCE);
+                    _staking.addRewardToken(assets[added]);
+                }
             }
         }
 
-        for (uint256 i = 0; i < 3; i++) {
-            assertApproxEqAbs(lockers[i].balance + _staking.checkEthReward(lockers[i]), owed[0][i], 128, "ETH");
-            assertApproxEqAbs(
-                IERC20(_DAI).balanceOf(lockers[i]) + _staking.checkTokenReward(_DAI, lockers[i]), owed[1][i], 128, "DAI"
-            );
-            assertApproxEqAbs(
-                late.balanceOf(lockers[i]) + _staking.checkTokenReward(address(late), lockers[i]),
-                owed[2][i],
-                128,
-                "token added half way"
-            );
+        for (uint256 a = 0; a <= added; a++) {
+            for (uint256 i = 0; i < 3; i++) {
+                uint256 received = a == 0 ? lockers[i].balance : IERC20(assets[a]).balanceOf(lockers[i]);
+                uint256 claimable =
+                    a == 0 ? _staking.checkEthReward(lockers[i]) : _staking.checkTokenReward(assets[a], lockers[i]);
+                assertApproxEqAbs(received + claimable, owed[a][i], 256, "a locker is not owed what it earned");
+            }
         }
     }
 
+    // --- The limits of what a checkpoint can hold ---
+
+    function testAnAssetAtItsLastVersionCannotBePaidInAndTheOthersGoOn() external {
+        // Each asset has 2**30 - 1 versions. The latest versions are written straight into storage
+        // here (`assetVersions`, slot 4: 30 bits for each asset, then one "noted down" bit for each).
+        _lock(_alice, 4_000 ether);
+        _upgradeStaking();
+        PlainToken first = new PlainToken();
+        PlainToken second = new PlainToken();
+        vm.startPrank(_GOVERNANCE);
+        _staking.addRewardToken(address(first));
+        _staking.addRewardToken(address(second));
+        vm.stopPrank();
+        uint256 last = 2 ** 30 - 1;
+        // ETH at its last version but one, the first token at its last, the second at 5; all noted down.
+        vm.store(_STAKING, bytes32(uint256(4)), bytes32((last - 1) | (last << 30) | (5 << 60) | (uint256(31) << 150)));
+
+        _payEthRewards(1 ether);
+        uint256 word = uint256(vm.load(_STAKING, bytes32(uint256(4))));
+        assertEq(word & last, last, "ETH at its last version");
+        assertEq((word >> 30) & last, last, "the first token is untouched: nothing carried over");
+        assertEq((word >> 60) & last, 5, "so is the second");
+        assertEq(word >> 150, 30, "only the bit of ETH is off");
+
+        // No checkpoint since: the last version can still be raised.
+        _payEthRewards(1 ether);
+
+        // A checkpoint by anyone, and from then on ETH cannot be paid in. Nor the first token.
+        _lock(_bob, 100 ether);
+        deal(_payer, 1 ether);
+        vm.prank(_payer);
+        vm.expectRevert(bytes("too many versions"));
+        _staking.addEthRewards{value: 1 ether}();
+        first.mint(_STAKING, 1 ether);
+        vm.expectRevert(bytes("too many versions"));
+        _staking.addTokenRewards(address(first));
+
+        // The second token, locks, unlocks and claims are not affected.
+        second.mint(_STAKING, 500 ether);
+        _staking.addTokenRewards(address(second));
+        vm.expectEmit(true, false, false, false, _GOVERNANCE);
+        emit RewardUpdateSuccessful(_alice);
+        vm.prank(_alice);
+        _gov.unlock(1_000 ether);
+        _claimEth(_alice);
+        _claimToken(address(second), _alice);
+        assertGt(_alice.balance, 0, "ETH earned before the limit is paid");
+        assertGt(second.balanceOf(_alice), 0, "and so is the second token");
+    }
+
+    function testAnAccountThatUsesUpItsCheckpointsStopsEarningInAssets() external {
+        // An account has 2**22 - 1 checkpoints. Its count is written straight into storage here (the
+        // top 22 bits of its first checkpoint, `checkpoints[account][0]` in slot 6), together with the
+        // checkpoint it has claimed ETH up to (`claimedUpTo[ETH][account]` in slot 7).
+        _upgradeStaking();
+        _lock(_alice, 1_000 ether);
+        _payEthRewards(1 ether);
+        uint256 owedBefore = _staking.checkEthReward(_alice);
+        assertGt(owedBefore, 0, "alice earns ETH");
+        uint256 most = 2 ** 22 - 1;
+        bytes32 firstCheckpoint = keccak256(abi.encode(uint256(0), keccak256(abi.encode(_alice, uint256(6)))));
+        uint256 word = uint256(vm.load(_STAKING, firstCheckpoint));
+        vm.store(_STAKING, firstCheckpoint, bytes32((word & (2 ** 234 - 1)) | ((most - 1) << 234)));
+        vm.store(
+            _STAKING, keccak256(abi.encode(_alice, keccak256(abi.encode(address(0), uint256(7))))), bytes32(most - 1)
+        );
+        assertEq(_staking.checkpointCount(_alice), most - 1, "one checkpoint short of the most");
+        assertEq(_staking.checkEthReward(_alice), owedBefore, "same rewards with the count moved up");
+
+        _lock(_alice, 1_000 ether);
+        assertEq(_staking.checkpointCount(_alice), most, "the last checkpoint");
+        _payEthRewards(1 ether);
+        // The reward update itself still goes through: Governance reports it as done.
+        deal(_TORN, _alice, 1_000 ether);
+        vm.startPrank(_alice);
+        _torn.approve(_GOVERNANCE, 1_000 ether);
+        vm.expectEmit(true, false, false, false, _GOVERNANCE);
+        emit RewardUpdateSuccessful(_alice);
+        _gov.lockWithApproval(1_000 ether);
+        vm.stopPrank();
+        assertEq(_staking.checkpointCount(_alice), most, "no new checkpoint, and the count does not start again");
+        _payEthRewards(1 ether);
+
+        assertEq(_staking.checkEthReward(_alice), owedBefore, "nothing earned after the last checkpoint");
+        _claimEth(_alice);
+        assertEq(_alice.balance, owedBefore, "what was earned before it is paid");
+    }
+
+    // --- A lock or unlock cannot go through without the reward update ---
     // --- A lock or unlock cannot go through without the reward update ---
 
     function testRewardUpdateCannotBeSkippedByChoosingTheGas() external {
@@ -1082,30 +1182,35 @@ contract TornadoStakingRewardsTest is ProposalFixture {
         // So skipping the update only works if about 1/32 of the update's gas is enough to finish the
         // lock or unlock, that is, if the update is very expensive.
         //
-        // Measured here for the most expensive update there can be (a locker from before the staking
-        // contract existed, with several checkpoints and unsettled rewards in every asset) against the
-        // cheapest lock and unlock there can be. Skipping the update takes more than 3.5 times the gas
-        // of a whole lock or unlock, with ETH only and with every reward token added: the update notes
-        // down one word for all the assets, so its cost does not depend on how many there are.
-        _upgradeStaking();
-        (uint256 unlockAlone, uint256 lockAlone) = _assertUpdateCannotBeSkipped(0, 7);
-        (uint256 unlockWithAll, uint256 lockWithAll) = _assertUpdateCannotBeSkipped(_staking.MAX_REWARD_TOKENS(), 7);
-
+        // Measured here for the most expensive update there can be against the cheapest lock and unlock
+        // there can be. The most expensive update is the first one of an account that locked before
+        // the staking contract existed and has not moved since: nothing is noted down for it yet, in
+        // TORN or in the assets, and fees have arrived in every asset.
+        // Skipping the update takes more than 3.5 times the gas of a whole lock or unlock, with ETH
+        // only and with every reward token added: the update takes one checkpoint for all the assets,
+        // so its cost does not depend on how many there are.
+        (uint256 unlockAlone, uint256 lockAlone) = _assertUpdateCannotBeSkipped(0, true, 7);
+        (uint256 unlockWithAll, uint256 lockWithAll) = _assertUpdateCannotBeSkipped(_MAX_REWARD_TOKENS, true, 7);
         assertApproxEqRel(unlockWithAll, unlockAlone, 0.01e18, "an unlock costs the same with every reward token");
         assertApproxEqRel(lockWithAll, lockAlone, 0.01e18, "a lock costs the same with every reward token");
+
+        // Once only, the first checkpoint anybody takes after the upgrade also writes `assetVersions`
+        // for the first time. If that account is one of those, it is still more than 3 times.
+        _assertUpdateCannotBeSkipped(0, false, 6);
     }
 
     /// @param tokens how many reward tokens the staking contract has
+    /// @param someoneMovedBefore whether another account has locked since the upgrade
     /// @param halves a lock or unlock without the update must take at least `halves`/2 times the gas
     ///        of a whole lock or unlock with it
     /// @return unlockGas least gas for an unlock with the reward update
     /// @return lockGas least gas for a lock with the reward update
-    function _assertUpdateCannotBeSkipped(uint256 tokens, uint256 halves)
+    function _assertUpdateCannotBeSkipped(uint256 tokens, bool someoneMovedBefore, uint256 halves)
         internal
         returns (uint256 unlockGas, uint256 lockGas)
     {
         uint256 start = vm.snapshotState();
-        GasPickingLocker locker = _lockerWithUnsettledRewards(tokens);
+        GasPickingLocker locker = _lockerFromBeforeTheStakingContract(tokens, someoneMovedBefore);
 
         for (uint256 lock = 0; lock < 2; lock++) {
             // Least gas with which the lock or unlock completes and the rewards are updated.
@@ -1133,23 +1238,32 @@ contract TornadoStakingRewardsTest is ProposalFixture {
         vm.revertToState(start);
     }
 
-    /// @dev A locker whose next reward update writes the most storage it ever will. It has locked
-    ///      twice with fees in between, so it has checkpoints already, and rewards were paid since in
-    ///      TORN, in ETH and in each of `tokens` reward tokens. For TORN it stands for an account that
-    ///      locked before the staking contract existed (May 2023) and has not moved since: nothing is
-    ///      noted down for it there.
-    function _lockerWithUnsettledRewards(uint256 tokens) internal returns (GasPickingLocker locker) {
+    /// @dev A locker whose next reward update writes the most storage it ever will. It locked while the
+    ///      staking contract was the one live today, and stands for an account that locked before the
+    ///      staking contract existed (May 2023) and has not moved since: nothing is noted down for it,
+    ///      in TORN or in the assets. The staking contract is then upgraded and fees are paid in TORN,
+    ///      in ETH and in each of `tokens` reward tokens. With `someoneMovedBefore`, another account
+    ///      took a checkpoint first and fees were paid again, as is the case from the first lock or
+    ///      unlock after the upgrade on.
+    function _lockerFromBeforeTheStakingContract(uint256 tokens, bool someoneMovedBefore)
+        internal
+        returns (GasPickingLocker locker)
+    {
+        locker = new GasPickingLocker(_gov, _torn);
+        deal(_TORN, address(locker), 2_000 ether);
+        locker.lock(1_000 ether);
+        // `accumulatedRewardRateOnLastUpdate[locker]`, in slot 2 of the staking contract, back to zero.
+        vm.store(_STAKING, keccak256(abi.encode(address(locker), uint256(2))), bytes32(0));
+
+        _upgradeStaking();
         PlainToken[] memory rewardTokens = new PlainToken[](tokens);
         for (uint256 i = 0; i < tokens; i++) {
             rewardTokens[i] = new PlainToken();
             vm.prank(_GOVERNANCE);
             _staking.addRewardToken(address(rewardTokens[i]));
         }
-        locker = new GasPickingLocker(_gov, _torn);
-        deal(_TORN, address(locker), 3_000 ether);
-
-        for (uint256 round = 0; round < 3; round++) {
-            if (round < 2) locker.lock(1_000 ether);
+        for (uint256 round = 0; round < (someoneMovedBefore ? 2 : 1); round++) {
+            if (round == 1) _lock(_alice, 1_000 ether);
             vm.prank(_RELAYER_REGISTRY);
             _staking.addBurnRewards(500 ether);
             _payEthRewards(1 ether);
@@ -1158,9 +1272,7 @@ contract TornadoStakingRewardsTest is ProposalFixture {
                 _staking.addTokenRewards(address(rewardTokens[i]));
             }
         }
-        assertEq(_staking.checkpointCount(address(locker)), 2, "checkpoints of the locker");
-        // `accumulatedRewardRateOnLastUpdate[locker]`, in slot 2 of the staking contract, back to zero.
-        vm.store(_STAKING, keccak256(abi.encode(address(locker), uint256(2))), bytes32(0));
+        assertEq(_staking.checkpointCount(address(locker)), 0, "the locker has a checkpoint");
         assertEq(_staking.accumulatedRewardRateOnLastUpdate(address(locker)), 0, "TORN rate still noted down");
     }
 

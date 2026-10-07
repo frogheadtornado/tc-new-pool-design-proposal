@@ -60,28 +60,32 @@ contract TornadoStakingRewards is Initializable, EnsResolve {
     /// @notice ETH is accounted under this address
     address public constant ETH = address(0);
     /// @notice the most tokens that can pay rewards: a checkpoint has room for ETH and this many tokens
-    uint256 public constant MAX_REWARD_TOKENS = 5;
+    uint256 public constant MAX_REWARD_TOKENS = 4;
 
     // The reward per TORN of an asset is kept in numbered versions. Payments raise the latest one. Once
     // a checkpoint notes a version down, that version is never written again and the next payment
     // starts a new one, so it keeps the value the reward per TORN had when the checkpoint was taken.
     //
     // A checkpoint is one word:
-    //   bits   0-143  the version of each asset, 24 bits each (asset 0 is ETH, 1 to 5 the tokens)
-    //   bits 144-231  the TORN the account had locked until then
-    //   bits 232-255  in the first checkpoint of an account only: how many checkpoints it has
+    //   bits   0-149  the version of each asset, 30 bits each (asset 0 is ETH, 1 to 4 the tokens)
+    //   bits 150-233  the TORN the account had locked until then
+    //   bits 234-255  in the first checkpoint of an account only: how many checkpoints it has
     // assetVersions is one word:
-    //   bits   0-143  the latest version of each asset, 24 bits each
-    //   bits 144-149  for each asset, whether a checkpoint notes its latest version down
-    uint256 private constant VERSION_BITS = 24;
-    uint256 private constant VERSION_MAX = 2**24 - 1;
-    uint256 private constant VERSIONS_MASK = 2**144 - 1;
-    uint256 private constant BALANCE_SHIFT = 144;
-    uint256 private constant BALANCE_MAX = 2**88 - 1;
-    uint256 private constant COUNT_SHIFT = 232;
-    uint256 private constant COUNT_MAX = 2**24 - 1;
-    uint256 private constant NOTED_SHIFT = 144;
-    uint256 private constant ALL_NOTED = (2**6 - 1) << 144;
+    //   bits   0-149  the latest version of each asset, 30 bits each
+    //   bits 150-154  for each asset, whether a checkpoint notes its latest version down
+    //
+    // 30 bits of versions: starting one takes a lock or unlock and then a payment, so using them all
+    // up, after which the asset could not be paid in any more, would take over a billion of each.
+    uint256 private constant VERSION_BITS = 30;
+    uint256 private constant VERSION_MAX = 2**30 - 1;
+    uint256 private constant VERSIONS_MASK = 2**150 - 1;
+    uint256 private constant BALANCE_SHIFT = 150;
+    uint256 private constant BALANCE_MAX = 2**84 - 1;
+    uint256 private constant COUNT_SHIFT = 234;
+    uint256 private constant COUNT_BITS = 22;
+    uint256 private constant COUNT_MAX = 2**22 - 1;
+    uint256 private constant NOTED_SHIFT = 150;
+    uint256 private constant ALL_NOTED = (2**5 - 1) << 150;
 
     /// @notice the latest version of each asset, and whether a checkpoint notes it down
     uint256 private assetVersions;
@@ -91,7 +95,7 @@ contract TornadoStakingRewards is Initializable, EnsResolve {
     /// @notice account => number => checkpoint, taken on a lock or unlock
     mapping(address => mapping(uint256 => uint256)) private checkpoints;
     /// @notice asset => account => up to where the account has claimed: the reward per TORN reached
-    ///         (from bit 24 up) and the next checkpoint to use (bits 0-23)
+    ///         (from bit 22 up) and the next checkpoint to use (bits 0-21)
     mapping(address => mapping(address => uint256)) private claimedUpTo;
     /// @notice the tokens that pay rewards, in the order Governance added them
     address[] public rewardTokens;
@@ -415,7 +419,7 @@ contract TornadoStakingRewards is Initializable, EnsResolve {
         if (versions & noted != 0) {
             require(version < VERSION_MAX, "too many versions");
             version = version + 1;
-            // one more in the asset's 24 bits, which cannot carry into the next asset's, and the bit off
+            // one more in the asset's 30 bits, which cannot carry into the next asset's, and the bit off
             assetVersions = (versions ^ noted) + (1 << (number * VERSION_BITS));
         }
         assetRewardPerTornAt[asset][version] = rewardPerTorn;
@@ -446,7 +450,7 @@ contract TornadoStakingRewards is Initializable, EnsResolve {
         }
         if (versions & ALL_NOTED != ALL_NOTED) assetVersions = versions | ALL_NOTED;
 
-        // The locked balance always fits in 88 bits: there are fewer than 2**84 units of TORN.
+        // The locked balance always fits in 84 bits: there are fewer than 2**84 units of TORN.
         if (amountLockedBeforehand > BALANCE_MAX) amountLockedBeforehand = BALANCE_MAX;
         uint256 checkpoint = (versions & VERSIONS_MASK) | (amountLockedBeforehand << BALANCE_SHIFT);
         if (count == 0) {
@@ -478,7 +482,7 @@ contract TornadoStakingRewards is Initializable, EnsResolve {
     ) private view returns (uint256 rewards, uint256 claimed) {
         claimed = claimedUpTo[asset][account];
         uint256 next = claimed & COUNT_MAX;
-        uint256 rewardPerTorn = claimed >> VERSION_BITS;
+        uint256 rewardPerTorn = claimed >> COUNT_BITS;
         uint256 first = checkpoints[account][0];
         uint256 count = first >> COUNT_SHIFT;
         uint256 end = count - next > maxCheckpoints ? next + maxCheckpoints : count;
@@ -499,7 +503,7 @@ contract TornadoStakingRewards is Initializable, EnsResolve {
             );
             rewardPerTorn = rewardPerTornNow;
         }
-        claimed = (rewardPerTorn << VERSION_BITS) | next;
+        claimed = (rewardPerTorn << COUNT_BITS) | next;
     }
 
     /**
