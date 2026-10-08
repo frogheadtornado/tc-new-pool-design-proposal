@@ -276,7 +276,7 @@ The remaining two suites are for the second proposal. `test/StakingUpgradePropos
 
 ### End-to-end test on a local fork
 
-`./e2e/run.sh` starts a local anvil fork of mainnet, deploys with `script/Deploy.s.sol`, passes the proposal through the live Governance contract, then makes real notes, deposits and withdraws from the pool with real zero-knowledge proofs (registered relayer, unregistered relayer, direct, through the Router without a relayer), and has a staker claim TORN. Up to there it is what mainnet will look like after this proposal: the ETH fees are in the pool. It then goes on with the second proposal: it passes the staking upgrade through Governance, forwards the fees the pool was holding, makes one more withdrawal, and has the staker claim ETH and unlock. Nothing is mocked: the withdrawals are checked by the verifier contract that is live on mainnet. Every amount is compared with the design and the run stops at the first mismatch. The measured amounts are written to [`e2e/RESULTS.md`](e2e/RESULTS.md).
+`./e2e/phase1.sh` starts a local anvil fork of mainnet and walks through the state after this proposal, one step at a time: it deposits into the 0.01 ETH pool and withdraws through each path (registered relayer, unregistered relayer, the user's own wallet straight to the pool, the user's own wallet through the Router), with real notes and real zero-knowledge proofs checked by the verifier contract live on mainnet, and prints after each one where every wei went. It then has Governance change the fees by proposal and checks the next withdrawals follow the new rates, tries fee values above the caps and a caller that is not Governance (all refused, as they must be), shows that the fees cannot leave the pool before the staking upgrade (the sweep is refused, which is the expected result), simulates the staking upgrade on the fork, sweeps the fees to the staking contract and has a locker claim its share. If the fork is from before the proposal's execution it first passes the proposal deployed on mainnet through Governance on the fork, and says so. Every amount is compared with the design and the first mismatch stops the run. Each step is a test: [`e2e/PHASE1-RESULTS.md`](e2e/PHASE1-RESULTS.md) records what it verifies, the expected result, whether it passed, the command and its output; [`e2e/PHASE1.md`](e2e/PHASE1.md) explains the steps and how to run them one by one. `npm test` in `e2e/` runs the unit tests of the pure parts.
 
 It needs Node.js and the classic UI's `tornado.json.gz` and `tornadoProvingKey.bin.gz` (looked for in `../classic-ui/static`, or in `TORNADO_KEYS_DIR`). The RPC URL is read from `ETH_RPC_URL` or `RPC_URL`, or from a `.env` file in this repository or its parent folder.
 
@@ -305,7 +305,10 @@ test/FeeEnforcedTornado_eth.t.sol
 test/StakingUpgradeProposal.t.sol
 test/TornadoStakingRewards.t.sol
 test/utils/ProposalFixture.sol         # shared fork, deployment and governance execution
-e2e/run.sh                             # end-to-end test on a local fork, with real notes and proofs
-e2e/src/                               # its code: notes, Merkle tree and proofs; the test itself
-e2e/RESULTS.md                         # amounts measured by the last run
+test/utils/FeeChangeProposal.sol       # helper for the walkthrough: a proposal that changes a pool's fees
+e2e/phase1.sh                          # the phase I walkthrough, one step at a time, on a local fork
+e2e/PHASE1.md                          # what each step of the walkthrough does and how to run it
+e2e/src/                               # its code: notes, Merkle tree and proofs; the steps and the report
+e2e/test/                              # unit tests of the pure parts (npm test)
+e2e/PHASE1-RESULTS.md                  # the last run: each test, its expected result, pass/fail, command and output
 ```

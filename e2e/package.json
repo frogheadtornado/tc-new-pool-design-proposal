@@ -1,9 +1,11 @@
 {
   "name": "tc-new-pool-design-proposal-e2e",
   "private": true,
-  "description": "End-to-end test of the fee-enforced pools and the staking upgrade on a local mainnet fork",
+  "description": "End-to-end walkthrough of the fee-enforced pool on a local mainnet fork",
   "scripts": {
-    "e2e": "./run.sh"
+    "phase1": "./phase1.sh",
+    "phase1:fork": "./phase1.sh fork",
+    "test": "node --test test/"
   },
   "dependencies": {
     "circomlibjs": "0.1.7",

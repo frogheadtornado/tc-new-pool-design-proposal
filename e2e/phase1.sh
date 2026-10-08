@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# End-to-end test on a local mainnet fork: deploy, pass the proposal through Governance, then make
-# notes, deposit and withdraw with real proofs through every path, and collect staking rewards.
-# Writes the measured amounts to e2e/RESULTS.md and stops at the first amount that is wrong.
+# Phase I walkthrough on a local mainnet fork: deposit into the 0.01 ETH pool and withdraw through
+# every path, showing where each wei goes; then show the fees cannot leave the pool until the
+# staking upgrade, simulate that upgrade, and watch a TORN locker claim the fees.
 #
-#   ./e2e/run.sh
+#   ./e2e/phase1.sh          run every step and write e2e/PHASE1-RESULTS.md
+#   ./e2e/phase1.sh fork     only start the fork and keep it running, to run the steps one by one:
+#                            node e2e/src/phase1.js setup | deposit | withdraw --via <path> | ...
 #
 # Needs Foundry (forge, cast, anvil) and Node.js. The mainnet RPC URL is read from ETH_RPC_URL or
 # RPC_URL, or from a .env file in this repository or in its parent folder.
@@ -16,6 +18,7 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo"
+mode="${1:-all}"
 
 rpc_url="${ETH_RPC_URL:-${RPC_URL:-}}"
 if [ -z "$rpc_url" ]; then
@@ -34,10 +37,7 @@ fi
 keys_dir="${TORNADO_KEYS_DIR:-$repo/../classic-ui/static}"
 port="${ANVIL_PORT:-8545}"
 local_rpc="http://127.0.0.1:$port"
-work="$repo/e2e/.work"
-# First account of anvil's default mnemonic: it only pays for the deployments on the fork.
-deployer=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
-mkdir -p "$work"
+mkdir -p "$repo/e2e/.work"
 
 if cast block-number --rpc-url "$local_rpc" >/dev/null 2>&1; then
   echo "Something is already listening on port $port. Stop it or set ANVIL_PORT." >&2
@@ -61,14 +61,16 @@ for _ in $(seq 1 100); do
 done
 cast block-number --rpc-url "$local_rpc" >/dev/null 2>&1 || { echo "anvil did not start: check the RPC URL." >&2; exit 1; }
 
-echo "==> Deploying the proposal"
-# The broadcast log goes to the scratch folder, so that it is not mistaken for a mainnet deployment.
-FOUNDRY_BROADCAST="$work/broadcast" forge script script/Deploy.s.sol \
-  --rpc-url "$local_rpc" --broadcast --unlocked --sender "$deployer" >"$work/deploy.log" 2>&1 \
-  || { cat "$work/deploy.log" >&2; exit 1; }
-proposal="$(grep -Eo "AddEthPoolsProposal 0x[0-9a-fA-F]{40}" "$work/deploy.log" | tail -n 1 | cut -d' ' -f2)"
-[ -n "$proposal" ] || { echo "the deployment did not print the proposal's address:" >&2; cat "$work/deploy.log" >&2; exit 1; }
-echo "  AddEthPoolsProposal $proposal"
+if [ "$mode" = "fork" ]; then
+  echo "Fork of mainnet block $(cast block-number --rpc-url "$local_rpc") running at $local_rpc. Ctrl-C stops it."
+  echo "In another terminal, from the repository root:"
+  echo "  node e2e/src/phase1.js setup --rpc $local_rpc --keys \"$keys_dir\""
+  echo "  node e2e/src/phase1.js deposit"
+  echo "  node e2e/src/phase1.js withdraw --via registered     (then: unregistered, self, router)"
+  echo "  node e2e/src/phase1.js sweep | phase2 | sweep | claim | report"
+  wait "$anvil_pid"
+  exit 0
+fi
 
-echo "==> Running the end-to-end test"
-node e2e/src/e2e.js --rpc "$local_rpc" --keys "$keys_dir" --proposal "$proposal" --out "$repo/e2e/RESULTS.md"
+echo "==> Running the walkthrough"
+node e2e/src/phase1.js all --rpc "$local_rpc" --keys "$keys_dir" --out "$repo/e2e/PHASE1-RESULTS.md"
