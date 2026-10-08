@@ -63,18 +63,19 @@ contract FeeChangeProposal {
 
         (bool isERC20, address token, uint8 state, uint24 uniswapPoolSwappingFee,) =
             IInstanceRegistryFees(INSTANCE_REGISTRY).instances(pool);
-        IInstanceRegistryFees(INSTANCE_REGISTRY).updateInstance(
-            IInstanceRegistryFees.Tornado({
-                addr: pool,
-                instance: IInstanceRegistryFees.Instance({
-                    isERC20: isERC20,
-                    token: token,
-                    state: state,
-                    uniswapPoolSwappingFee: uniswapPoolSwappingFee,
-                    protocolFeePercentage: uint32(protocolFeePercentage)
+        IInstanceRegistryFees(INSTANCE_REGISTRY)
+            .updateInstance(
+                IInstanceRegistryFees.Tornado({
+                    addr: pool,
+                    instance: IInstanceRegistryFees.Instance({
+                        isERC20: isERC20,
+                        token: token,
+                        state: state,
+                        uniswapPoolSwappingFee: uniswapPoolSwappingFee,
+                        protocolFeePercentage: uint32(protocolFeePercentage)
+                    })
                 })
-            })
-        );
+            );
         IFeeManagerFees(FEE_MANAGER).updateFee(pool);
     }
 }
